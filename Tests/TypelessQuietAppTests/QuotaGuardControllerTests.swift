@@ -5,8 +5,12 @@ import XCTest
 
 private final class GuardMutableReader: TypelessCurrentStateReading {
     var result: TypelessStateReadResult
+    var onRead: (() -> Void)?
     init(result: TypelessStateReadResult) { self.result = result }
-    func read() throws -> TypelessStateReadResult { result }
+    func read() throws -> TypelessStateReadResult {
+        onRead?()
+        return result
+    }
 }
 
 private final class GuardSecretStore: AccountSecretStoring, @unchecked Sendable {
@@ -73,6 +77,54 @@ private final class GuardClock {
 @MainActor
 final class QuotaGuardControllerTests: XCTestCase {
     private let initialDate = Date(timeIntervalSince1970: 50_000)
+
+    func testNewlyReadQuotaIsEvaluatedAfterObservationCompletes() throws {
+        let fixture = try makeFixture()
+        let completedAt = initialDate.addingTimeInterval(0.1)
+        var state = makeState(account: fixture.current, quotaObservedAt: completedAt)
+        state.activity = .unknown
+        fixture.reader.result = TypelessStateReadResult(state: state,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        let clock = fixture.clock
+        fixture.reader.onRead = { clock.date = completedAt }
+
+        fixture.guardController.evaluateNow()
+
+        XCTAssertEqual(fixture.guardController.lastCheckedAt, completedAt)
+        XCTAssertEqual(fixture.guardController.lastDecision, .needsManualVerification(fixture.target.id))
+        XCTAssertEqual(fixture.opener.openCount, 0)
+    }
+
+    func testRecommendationDoesNotOpenLoginAndSnoozeDoesNotCountAsFailure() throws {
+        let fixture = try makeFixture()
+        var state = fixture.reader.result.state
+        state.activity = .unknown
+        fixture.reader.result = TypelessStateReadResult(state: state,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        fixture.guardController.evaluateNow()
+        XCTAssertEqual(fixture.guardController.recommendedAccountID, fixture.target.id)
+        XCTAssertEqual(fixture.opener.openCount, 0)
+        fixture.guardController.snoozeRecommendation()
+        fixture.guardController.evaluateNow()
+        XCTAssertEqual(fixture.guardController.lastDecision, .noAction(.cooldown))
+        XCTAssertEqual(fixture.guardController.runtime.consecutiveFailures, 0)
+        XCTAssertEqual(fixture.opener.openCount, 0)
+    }
+
+    func testRecommendationClickRechecksRecordingAndNeverOpensWhileBusy() throws {
+        let fixture = try makeFixture()
+        var state = fixture.reader.result.state
+        state.activity = .unknown
+        fixture.reader.result = TypelessStateReadResult(state: state,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        fixture.guardController.evaluateNow()
+        state.activity = .recording
+        fixture.reader.result = TypelessStateReadResult(state: state,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        fixture.guardController.startRecommendedSwitch()
+        XCTAssertEqual(fixture.guardController.lastDecision, .noAction(.activityRecording))
+        XCTAssertEqual(fixture.opener.openCount, 0)
+    }
 
     func testStoreDefaultsVersionedRoundTripsAndUsesPrivatePermissions() throws {
         let root = FileManager.default.temporaryDirectory

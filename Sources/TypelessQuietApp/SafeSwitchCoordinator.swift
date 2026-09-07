@@ -135,7 +135,8 @@ final class SwitchCoordinator: ObservableObject {
         self.init(
             accountManager: accountManager,
             loginOpener: OfficialTypelessLoginOpener(),
-            auditStore: Self.defaultAuditStore()
+            auditStore: Self.defaultAuditStore(),
+            verificationTimeout: 300
         )
     }
 
@@ -170,7 +171,7 @@ final class SwitchCoordinator: ObservableObject {
     var officialLoginURL: URL { loginOpener.loginURL }
 
     var canRecoverTerminalOperation: Bool {
-        guard operation?.outcome == .recoveryRequired,
+        guard [.recoveryRequired, .verificationRequired].contains(operation?.outcome),
               let originalID = operation?.originalAccountID
         else {
             return false
@@ -276,6 +277,8 @@ final class SwitchCoordinator: ObservableObject {
                 finish(phase: .succeeded, outcome: .succeeded, failure: nil)
             case let .originalPreserved(failure):
                 finish(phase: .failed, outcome: .originalPreserved, failure: failure)
+            case let .requiresVerification(failure):
+                finish(phase: .failed, outcome: .verificationRequired, failure: failure)
             case let .requiresRollback(failure):
                 beginRollback(trigger: failure)
             }
@@ -308,15 +311,42 @@ final class SwitchCoordinator: ObservableObject {
     func cancelAndRestore() {
         guard let plan = activePlan, isBusy else { return }
         accountManager.refresh()
-        let currentTime = now()
-        if accountManager.currentState?.email == plan.originalEmail,
-           let quota = accountManager.currentState?.quota,
-           quota.observedAt >= plan.requestedAt,
-           quota.isFresh(at: currentTime) {
+        if accountManager.currentState?.email == plan.originalEmail {
             finish(phase: .failed, outcome: .cancelled, failure: .cancelled)
         } else {
             beginRollback(trigger: .cancelled)
         }
+    }
+
+    var canResumeVerification: Bool {
+        operation?.outcome == .verificationRequired && operation?.originalAccountID != nil
+    }
+
+    func resumeVerification() {
+        guard canResumeVerification, let operation,
+              let originalID = operation.originalAccountID,
+              let original = accountManager.accounts.first(where: { $0.id == originalID }),
+              let target = accountManager.accounts.first(where: { $0.id == operation.targetAccountID }) else { return }
+        let requestedAt = now()
+        activePlan = SwitchPlan(transactionID: operation.id,
+            originalAccountID: original.id, targetAccountID: target.id,
+            originalEmail: original.email, targetEmail: target.email, source: operation.source,
+            requestedAt: requestedAt, verificationDeadline: requestedAt.addingTimeInterval(verificationTimeout))
+        self.operation?.phase = .verifying
+        self.operation?.outcome = nil
+        self.operation?.failureCode = nil
+        self.operation?.verificationDeadline = activePlan?.verificationDeadline
+        guard appendCurrentEvent() else {
+            finish(phase: .failed, outcome: .verificationRequired, failure: .auditWriteFailed)
+            return
+        }
+        pollOnce()
+        if isBusy { startVerificationLoopIfNeeded() }
+    }
+
+    func stopTracking() {
+        guard isBusy else { return }
+        finish(phase: .failed, outcome: .cancelled, failure: .cancelled)
     }
 
     func reopenOfficialLogin() {

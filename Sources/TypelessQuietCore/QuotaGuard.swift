@@ -146,6 +146,7 @@ public enum QuotaGuardNoActionReason: String, Codable, Equatable, Sendable {
 public enum QuotaGuardDecision: Equatable, Sendable {
     case noAction(QuotaGuardNoActionReason)
     case trigger(UUID)
+    case needsManualVerification(UUID)
 }
 
 public struct QuotaGuardInput: Sendable {
@@ -217,7 +218,7 @@ public enum QuotaGuardPolicy {
         case .processing:
             return .noAction(.activityProcessing)
         case .unknown:
-            return .noAction(.activityUnknown)
+            break
         }
 
         let threshold = QuotaGuardConfiguration.normalizeThreshold(
@@ -236,20 +237,21 @@ public enum QuotaGuardPolicy {
         guard let currentIndex = pool.firstIndex(of: current.id) else {
             return .noAction(.poolAmbiguous)
         }
+        var unverifiedCandidate: UUID?
         for offset in 1 ..< pool.count {
             let candidateID = pool[(currentIndex + offset) % pool.count]
-            guard let candidate = accountsByID[candidateID], candidate.status == .available else {
+            guard let candidate = accountsByID[candidateID],
+                  candidate.status == .available || candidate.status == .unknown else { continue }
+            guard let quota = candidate.quota, quota.limitCharacters > 0,
+                  quota.isFresh(at: input.now, maximumAge: input.maximumDataAge) else {
+                if unverifiedCandidate == nil { unverifiedCandidate = candidateID }
                 continue
             }
-            guard let quota = candidate.quota,
-                  quota.limitCharacters > 0,
-                  quota.isFresh(at: input.now, maximumAge: input.maximumDataAge),
-                  quota.remainingCharacters > threshold
-            else {
-                continue
-            }
-            return .trigger(candidate.id)
+            guard quota.remainingCharacters > threshold else { continue }
+            return state.activity == .idle && candidate.status == .available
+                ? .trigger(candidate.id) : .needsManualVerification(candidate.id)
         }
+        if let unverifiedCandidate { return .needsManualVerification(unverifiedCandidate) }
         return .noAction(.noFreshTarget)
     }
 

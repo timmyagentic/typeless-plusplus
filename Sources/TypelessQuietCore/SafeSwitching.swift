@@ -64,6 +64,7 @@ public enum SwitchOutcome: String, Codable, Equatable, Sendable {
     case originalPreserved
     case originalRestored
     case recoveryRequired
+    case verificationRequired
     case cancelled
 }
 
@@ -161,6 +162,7 @@ public enum SwitchVerificationDecision: Equatable, Sendable {
     case pending
     case succeeded
     case originalPreserved(SwitchFailureCode)
+    case requiresVerification(SwitchFailureCode)
     case requiresRollback(SwitchFailureCode)
 }
 
@@ -178,7 +180,7 @@ public enum SwitchPolicy {
         guard let target = input.accounts.first(where: { $0.id == input.targetAccountID }) else {
             throw SwitchFailureCode.targetNotFound
         }
-        guard target.status == .available else {
+        guard target.status == .available || (input.source == .manual && target.status == .unknown) else {
             throw SwitchFailureCode.targetNotAvailable
         }
         guard input.typelessRunning else {
@@ -193,11 +195,15 @@ public enum SwitchPolicy {
         guard original.id != target.id, original.email != target.email else {
             throw SwitchFailureCode.alreadyCurrent
         }
-        guard let quota = input.currentState.quota, quota.limitCharacters > 0 else {
-            throw SwitchFailureCode.currentQuotaMissing
-        }
-        guard quota.isFresh(at: input.now, maximumAge: input.maximumQuotaAge) else {
-            throw SwitchFailureCode.currentQuotaStale
+        // Manual login only opens the official site; the user controls when to authenticate.
+        // Automated decisions still require a fresh quota and positive idle evidence.
+        if input.source == .quotaGuard {
+            guard let quota = input.currentState.quota, quota.limitCharacters > 0 else {
+                throw SwitchFailureCode.currentQuotaMissing
+            }
+            guard quota.isFresh(at: input.now, maximumAge: input.maximumQuotaAge) else {
+                throw SwitchFailureCode.currentQuotaStale
+            }
         }
         switch input.currentState.activity {
         case .idle:
@@ -207,7 +213,7 @@ public enum SwitchPolicy {
         case .processing:
             throw SwitchFailureCode.activityProcessing
         case .unknown:
-            throw SwitchFailureCode.activityUnknown
+            if input.source == .quotaGuard { throw SwitchFailureCode.activityUnknown }
         }
 
         return SwitchPlan(
@@ -230,6 +236,7 @@ public enum SwitchPolicy {
         if let state,
            state.email == plan.targetEmail,
            let quota = state.quota,
+           quota.limitCharacters > 0,
            quota.observedAt >= plan.requestedAt,
            quota.isFresh(at: now, maximumAge: maximumQuotaAge) {
             return .succeeded
@@ -238,18 +245,19 @@ public enum SwitchPolicy {
             return .pending
         }
         guard let state else {
-            return .requiresRollback(.verificationTimedOut)
+            return .requiresVerification(.verificationTimedOut)
         }
         if state.email == plan.originalEmail {
             if let quota = state.quota,
+               quota.limitCharacters > 0,
                quota.observedAt >= plan.requestedAt,
                quota.isFresh(at: now, maximumAge: maximumQuotaAge) {
                 return .originalPreserved(.verificationTimedOut)
             }
-            return .requiresRollback(.originalStateUnverified)
+            return .originalPreserved(.originalStateUnverified)
         }
         if state.email == plan.targetEmail {
-            return .requiresRollback(.verificationQuotaMissingOrStale)
+            return .requiresVerification(.verificationQuotaMissingOrStale)
         }
         return .requiresRollback(.verificationObservedDifferentAccount)
     }
@@ -265,6 +273,7 @@ public enum SwitchPolicy {
         if let state,
            state.email == plan.originalEmail,
            let quota = state.quota,
+           quota.limitCharacters > 0,
            quota.observedAt >= rollbackRequestedAt,
            quota.isFresh(at: now, maximumAge: maximumQuotaAge) {
             return .originalRestored

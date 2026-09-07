@@ -67,7 +67,56 @@ private struct StubStateReader: TypelessCurrentStateReading {
 }
 
 @MainActor
+private final class FakeTypelessClientController: TypelessClientControlling {
+    var restartCount = 0
+    func open() -> Bool { true }
+    func restart(completion: @escaping (Result<Void, Error>) -> Void) {
+        restartCount += 1
+        completion(.success(()))
+    }
+}
+
+@MainActor
 final class AccountManagerTests: XCTestCase {
+    func testExplicitRestartProtectsRecordingAndProcessingButDoesNotInventIdle() {
+        for activity in [TypelessActivityState.recording, .processing, .unknown] {
+            let original = makeReadResult()
+            var state = original.state
+            state.activity = activity
+            let result = TypelessStateReadResult(state: state, storageURL: original.storageURL,
+                appVersion: "2.5.0", appRunning: true)
+            let controller = FakeTypelessClientController()
+            let manager = AccountManager(directoryStore: FakeDirectoryStore(),
+                secretStore: FakeSecretStore(), stateReader: StubStateReader(result: result),
+                clientController: controller)
+
+            manager.restartTypeless()
+
+            XCTAssertEqual(controller.restartCount, activity == .unknown ? 1 : 0)
+            XCTAssertEqual(manager.currentState?.activity, activity)
+            XCTAssertFalse(manager.isRestartingTypeless)
+        }
+    }
+
+    func testManualEntryRemainsUnverifiedAndEmailEditClearsQuota() throws {
+        let fixture = try makeFixture()
+        try fixture.manager.addAccount(displayName: "New", email: "new@example.com", note: "", secret: "")
+        let newAccount = try XCTUnwrap(fixture.manager.accounts.first { $0.email == "new@example.com" })
+        XCTAssertEqual(newAccount.status, .unknown)
+        try fixture.manager.setPaused(true, accountID: newAccount.id)
+        try fixture.manager.setPaused(false, accountID: newAccount.id)
+        XCTAssertEqual(fixture.manager.accounts.first { $0.id == newAccount.id }?.status, .unknown)
+
+        try fixture.manager.addCurrentAccount()
+        let current = try XCTUnwrap(fixture.manager.accounts.first { $0.email == "person@example.com" })
+        try fixture.manager.updateAccount(id: current.id, displayName: "Edited", email: "edited@example.com",
+            note: "", status: .available, autoSwitchEligible: true, newSecret: nil, clearSecret: false)
+        let edited = try XCTUnwrap(fixture.manager.accounts.first { $0.id == current.id })
+        XCTAssertNil(edited.quota)
+        XCTAssertEqual(edited.status, .unknown)
+        XCTAssertFalse(edited.autoSwitchEligible)
+    }
+
     func testAddsAccountAndKeepsSecretOutOfJSON() throws {
         let fixture = try makeFixture()
         let manager = fixture.manager

@@ -76,7 +76,6 @@ final class QuotaGuardTests: XCTestCase {
         for (activity, reason) in [
             (TypelessActivityState.recording, QuotaGuardNoActionReason.activityRecording),
             (.processing, .activityProcessing),
-            (.unknown, .activityUnknown),
         ] {
             var fixture = try makeFixture()
             fixture.currentState.activity = activity
@@ -85,6 +84,13 @@ final class QuotaGuardTests: XCTestCase {
                 .noAction(reason)
             )
         }
+    }
+
+    func testUnknownActivityOffersActionWithoutAutomaticSwitch() throws {
+        var fixture = try makeFixture()
+        fixture.currentState.activity = .unknown
+        XCTAssertEqual(QuotaGuardPolicy.evaluate(fixture.input(now: now)),
+            .needsManualVerification(fixture.targetA.id))
     }
 
     func testRejectsBusySwitchAndStoppedTypeless() throws {
@@ -136,14 +142,14 @@ final class QuotaGuardTests: XCTestCase {
         )
     }
 
-    func testDoesNotUseStaleOrLowTarget() throws {
+    func testStaleCandidateOffersManualVerificationWithoutTrustingOldQuota() throws {
         var fixture = try makeFixture()
         fixture.accounts[1].quota?.observedAt = now.addingTimeInterval(-301)
         fixture.accounts[2].quota?.usedCharacters = 7_900
 
         XCTAssertEqual(
             QuotaGuardPolicy.evaluate(fixture.input(now: now)),
-            .noAction(.noFreshTarget)
+            .needsManualVerification(fixture.targetA.id)
         )
     }
 

@@ -1,5 +1,8 @@
+import AppKit
+import ApplicationServices
 import SwiftUI
 import TypelessQuietCore
+import UniformTypeIdentifiers
 
 enum MainWindowSection: String, CaseIterable, Identifiable {
     case overview = "概览"
@@ -69,6 +72,7 @@ struct CurrentAccountCard: View {
                     )
                 }
 
+                TypelessQuotaGuidance(manager: manager)
                 if state.email != nil && !manager.currentAccountIsManaged {
                     Button("添加当前账号") {
                         do {
@@ -91,6 +95,35 @@ struct CurrentAccountCard: View {
     }
 }
 
+struct TypelessQuotaGuidance: View {
+    @ObservedObject var manager: AccountManager
+
+    var body: some View {
+        if manager.currentReadResult?.quotaProvenance == .requiresClientRestart {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("需要刷新 Typeless 登录状态").font(.callout.weight(.semibold))
+                Text("尚不能确认主页额度属于当前账号。请结束录音，再重启 Typeless；随后打开设置 → 账户核对邮箱，回到主页即可自动同步。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(manager.isRestartingTypeless ? "正在重启…" : "录音结束后重启 Typeless") {
+                    manager.restartTypeless()
+                }
+                .disabled(manager.isRestartingTypeless)
+                if let message = manager.clientControlMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if manager.currentReadResult?.quotaProvenance == .awaitingIdentityConfirmation {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("请打开 Typeless 设置 → 账户核对邮箱，再回主页。完成后额度会自动同步。")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("打开 Typeless 核对账户") { manager.openTypeless() }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 struct AccountListSection: View {
     @ObservedObject var manager: AccountManager
     @ObservedObject var switchCoordinator: SwitchCoordinator
@@ -103,7 +136,7 @@ struct AccountListSection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("已有账号").font(.title3.weight(.semibold))
-                    Text("秘密只保存在 macOS Keychain")
+                    Text("通过官网登录；未识别活动状态时，请先停止录音再切换")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -117,6 +150,7 @@ struct AccountListSection: View {
             }
 
             SwitchStatusCard(manager: manager, coordinator: switchCoordinator)
+            TypelessQuotaGuidance(manager: manager)
 
             if manager.accounts.isEmpty {
                 VStack(spacing: 8) {
@@ -130,78 +164,82 @@ struct AccountListSection: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List {
-                    ForEach(manager.accounts) { account in
-                        HStack(spacing: 12) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(account.displayName).font(.headline)
-                                    if manager.currentState?.email == account.email {
-                                        Text("当前")
-                                            .font(.caption2.weight(.semibold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.green.opacity(0.14))
-                                            .clipShape(Capsule())
-                                    }
-                                }
-                                Text(account.email).font(.caption).foregroundStyle(.secondary)
-                                HStack(spacing: 8) {
-                                    Text(account.status.displayName)
-                                    Text(account.hasSecret ? "Keychain 已保存" : "无秘密")
-                                    if let quota = account.quota {
-                                        Text(quota.isFresh()
-                                            ? "剩余 \(quota.remainingCharacters.formatted())"
-                                            : "额度快照已过期")
-                                    }
-                                }
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Toggle(
-                                "启用",
-                                isOn: Binding(
-                                    get: { account.status != .paused },
-                                    set: { enabled in
-                                        do {
-                                            try manager.setPaused(!enabled, accountID: account.id)
-                                            localError = nil
-                                        } catch {
-                                            localError = error.localizedDescription
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(manager.accounts) { account in
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(account.displayName).font(.headline)
+                                        if manager.currentState?.email == account.email {
+                                            Text("当前")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.green.opacity(0.14))
+                                                .clipShape(Capsule())
                                         }
                                     }
-                                )
-                            )
-                            .labelsHidden()
-                            .disabled(switchCoordinator.isBusy)
-                            if manager.currentState?.email != account.email {
-                                Button("切换") {
-                                    switchCoordinator.startSwitch(to: account.id)
+                                    Text(account.email).font(.caption).foregroundStyle(.secondary)
+                                    HStack(spacing: 8) {
+                                        Text(account.quota == nil && account.status == .available ? "尚未验证" : account.status.displayName)
+                                        Text(account.hasSecret ? "Keychain 已保存" : "无秘密")
+                                        if let quota = account.quota {
+                                            Text(quota.isFresh()
+                                                ? "剩余 \(quota.remainingCharacters.formatted())"
+                                                : "额度快照已过期")
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                                 }
-                                .disabled(account.status != .available || switchCoordinator.isBusy)
+                                Spacer()
+                                Toggle(
+                                    "启用",
+                                    isOn: Binding(
+                                        get: { account.status != .paused },
+                                        set: { enabled in
+                                            do {
+                                                try manager.setPaused(!enabled, accountID: account.id)
+                                                localError = nil
+                                            } catch {
+                                                localError = error.localizedDescription
+                                            }
+                                        }
+                                    )
+                                )
+                                .labelsHidden()
+                                .disabled(switchCoordinator.isBusy)
+                                if manager.currentState?.email != account.email {
+                                    Button(account.status == .unknown ? "登录验证" : "切换") {
+                                        switchCoordinator.startSwitch(to: account.id)
+                                    }
+                                    .disabled(![.available, .unknown].contains(account.status) || switchCoordinator.isBusy)
+                                }
+                                Button {
+                                    editor = AccountEditorDraft(account: account)
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("编辑 \(account.displayName)")
+                                .disabled(switchCoordinator.isBusy)
+                                Button(role: .destructive) {
+                                    pendingDelete = account
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("删除 \(account.displayName)")
+                                .disabled(switchCoordinator.isBusy)
                             }
-                            Button {
-                                editor = AccountEditorDraft(account: account)
-                            } label: {
-                                Image(systemName: "pencil")
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel("编辑 \(account.displayName)")
-                            .disabled(switchCoordinator.isBusy)
-                            Button(role: .destructive) {
-                                pendingDelete = account
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel("删除 \(account.displayName)")
-                            .disabled(switchCoordinator.isBusy)
+                            .padding(.vertical, 4)
+                            .accessibilityElement(children: .contain)
+                            Divider()
                         }
-                        .padding(.vertical, 4)
                     }
+                    .padding(12)
                 }
-                .listStyle(.inset)
             }
 
             if let localError {
@@ -272,12 +310,16 @@ struct SwitchStatusCard: View {
                             : "重新打开官方登录") {
                             coordinator.reopenOfficialLogin()
                         }
+                        Button("停止跟踪") { coordinator.stopTracking() }
                         if operation.phase != .restoring {
                             Button("取消并恢复") {
                                 coordinator.cancelAndRestore()
                             }
                         }
                     } else {
+                        if coordinator.canResumeVerification {
+                            Button("继续验证当前账号") { coordinator.resumeVerification() }
+                        }
                         if coordinator.canRecoverTerminalOperation {
                             Button("打开官方恢复页") {
                                 coordinator.recoverTerminalOperation()
@@ -315,8 +357,9 @@ struct SwitchStatusCard: View {
             switch operation.outcome {
             case .originalPreserved: return "未切换，\(original) 已保留"
             case .originalRestored: return "切换未完成，已恢复 \(original)"
+            case .verificationRequired: return "登录结果待核对"
             case .recoveryRequired: return "需要恢复 \(original)"
-            case .cancelled: return "已取消切换"
+            case .cancelled: return "已停止跟踪"
             case .succeeded: return "已安全切换到 \(target)"
             case nil: return "切换未完成"
             }
@@ -328,15 +371,19 @@ struct SwitchStatusCard: View {
         let original = operation.originalAccountID.map(accountName) ?? "原账号"
         switch operation.phase {
         case .preflight:
-            return "正在确认 Typeless 空闲、当前账号和额度新鲜度。"
+            return "正在核对账号并检查活动状态。自动守护还要求新鲜额度与明确空闲证据。"
         case .requestingSwitch:
             return "Typeless++ 只打开官网，不读取或保存登录链接中的认证信息。"
         case .verifying:
-            return "请在官方页面登录“\(target)”。只有重新读到目标邮箱和本次操作后的新鲜额度才会成功。"
+            let targetEmail = manager.accounts.first { $0.id == operation.targetAccountID }?.email ?? target
+            if manager.currentState?.email == targetEmail {
+                return "已读取到目标邮箱 \(targetEmail)。请按下方提示核对额度，完成后自动确认成功。"
+            }
+            return "请在官方页面选择或登录 \(targetEmail)。完成桌面交接后会自动读取身份；每次换号需重启 Typeless 并在账户页核对邮箱，再回主页读取额度。"
         case .restoring:
             return "官方恢复页已打开，请登录“\(original)”；验证原邮箱和新鲜额度后才算恢复完成。"
         case .succeeded:
-            return "目标邮箱和新鲜额度均已从 Typeless 2.4.0 只读状态确认。"
+            return "目标邮箱和新鲜额度均已从 Typeless 官方界面确认。"
         case .failed:
             return operation.failureCode?.userMessage ?? "切换没有完成。"
         }
@@ -350,6 +397,8 @@ struct SwitchStatusCard: View {
 struct AccountDiagnosticsSection: View {
     @ObservedObject var manager: AccountManager
     @ObservedObject var switchCoordinator: SwitchCoordinator
+    @ObservedObject var guardController: QuotaGuardController
+    @State private var exportMessage: String?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -361,9 +410,18 @@ struct AccountDiagnosticsSection: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("导出脱敏诊断…") { exportDiagnostics() }
                 Button("重新检查") {
                     manager.refresh()
+                    manager.performSelfCheck()
                 }
+            }
+
+            Text("导出仅含版本、能力状态、账号数量和固定错误码，不含邮箱、路径、备注、额度数值或转录内容。")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let exportMessage {
+                Text(exportMessage).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
             }
 
             List {
@@ -410,6 +468,28 @@ struct AccountDiagnosticsSection: View {
         .padding(20)
     }
 
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "typeless-plusplus-diagnostics.json"
+        panel.message = "保存脱敏诊断。仅保存在你选择的位置，不会自动上传。"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let report = DiagnosticReport(
+            applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            buildVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+            macOSVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+            readResult: manager.currentReadResult, accounts: manager.accounts, diagnostics: manager.diagnostics,
+            auditEvents: switchCoordinator.auditEvents, auditAvailable: switchCoordinator.auditError == nil,
+            accessibilityGranted: AXIsProcessTrusted(), guardEnabled: guardController.configuration.isEnabled)
+        do {
+            try report.write(to: url)
+            exportMessage = "已保存脱敏诊断，可自行检查后分享。"
+        } catch {
+            exportMessage = "诊断保存失败，请检查所选目录的写入权限后重试。"
+        }
+    }
+
     private func auditDetail(_ event: SwitchAuditEvent) -> String {
         let target = manager.accounts.first(where: { $0.id == event.targetAccountID })?.displayName
             ?? "已删除账号"
@@ -439,7 +519,7 @@ struct AccountEditorDraft: Identifiable {
         displayName = account?.displayName ?? ""
         email = account?.email ?? ""
         note = account?.note ?? ""
-        status = account?.status ?? .available
+        status = account?.status ?? .unknown
         autoSwitchEligible = account?.autoSwitchEligible ?? false
         hasExistingSecret = account?.hasSecret ?? false
     }
@@ -488,7 +568,8 @@ private struct AccountEditorView: View {
                         Text(status.displayName).tag(status)
                     }
                 }
-                Toggle("允许未来的自动切换规则使用", isOn: $autoSwitchEligible)
+                Text("低额度守护的账号选择在“守护”页配置。")
+                    .font(.caption).foregroundStyle(.secondary)
                 SecureField(
                     draft.hasExistingSecret ? "新密码（留空则保持现有）" : "密码（可选）",
                     text: $secret
@@ -554,10 +635,10 @@ private struct AccountEditorView: View {
 private extension AccountStatus {
     var displayName: String {
         switch self {
-        case .available: "可用"
+        case .available: "已启用"
         case .paused: "已暂停"
         case .exhausted: "额度用尽"
-        case .unknown: "未知"
+        case .unknown: "待登录验证"
         }
     }
 }
@@ -599,7 +680,7 @@ private extension SwitchFailureCode {
         switch self {
         case .transactionInProgress: "已有切换正在进行。"
         case .targetNotFound: "目标账号已不存在，请刷新账号列表。"
-        case .targetNotAvailable: "目标账号已暂停、额度用尽或状态未知。"
+        case .targetNotAvailable: "目标账号已暂停或标记为额度用尽。"
         case .alreadyCurrent: "目标账号就是当前账号。"
         case .typelessNotRunning: "Typeless 未运行；打开 Typeless 后再试。"
         case .currentAccountUnreadable: "当前 Typeless 账号不可读，已安全停止。"
@@ -610,14 +691,14 @@ private extension SwitchFailureCode {
         case .activityProcessing: "Typeless 正在处理转录，已禁止切换。"
         case .activityUnknown: "无法证明 Typeless 已空闲，已安全停止。"
         case .officialLoginOpenFailed: "未能打开 Typeless 官方登录页，原账号未改动。"
-        case .verificationTimedOut: "在时限内没有验证到目标账号；原账号仍在使用。"
+        case .verificationTimedOut: "在时限内没有验证到目标邮箱和新鲜额度，请核对当前官方账号。"
         case .verificationObservedDifferentAccount: "Typeless 显示了非目标账号，已启动官方恢复。"
-        case .verificationQuotaMissingOrStale: "已看到目标邮箱，但没有本次操作后的新鲜额度，已启动恢复。"
-        case .originalStateUnverified: "仍看到原邮箱，但额度不是本次操作后的新鲜快照，已启动恢复验证。"
-        case .cancelled: "切换已取消。"
+        case .verificationQuotaMissingOrStale: "已看到目标邮箱，额度仍待核对。请刷新官方客户端后继续验证，或选择恢复原账号。"
+        case .originalStateUnverified: "仍看到原邮箱，额度尚未核对；请在官方客户端确认后重试。"
+        case .cancelled: "已停止跟踪。官网尚未完成的登录仍可能生效，请关闭不用的登录页。"
         case .rollbackOpenFailed: "未能打开官方恢复页，请点击重新打开并登录原账号。"
         case .rollbackTimedOut: "尚未验证原账号恢复，请重新打开官方页面继续恢复。"
-        case .auditWriteFailed: "切换审计不可写；为避免无记录切换，官方登录页没有打开。"
+        case .auditWriteFailed: "切换审计不可写，验证已停止；请检查诊断后重试。"
         case .interrupted: "上次切换被应用退出中断，没有自动继续。"
         }
     }
@@ -642,6 +723,7 @@ private extension SwitchOutcome {
         case .succeeded: "成功"
         case .originalPreserved: "原账号已保留"
         case .originalRestored: "原账号已恢复"
+        case .verificationRequired: "登录结果待核对"
         case .recoveryRequired: "仍需恢复"
         case .cancelled: "已取消"
         }

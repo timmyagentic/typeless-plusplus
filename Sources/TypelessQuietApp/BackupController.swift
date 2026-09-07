@@ -161,7 +161,10 @@ final class BackupController: ObservableObject {
             guardWasEnabled: backup.quotaGuard.wasEnabled
         )
         lastPreview = preview
-        message = "已合并 \(preview.accountCount) 个账号；守护保持关闭，请重新官方登录"
+        message = "已合并 \(preview.accountCount) 个账号；守护保持关闭"
+        if preview.reauthenticationCount > 0 {
+            message? += "，\(preview.reauthenticationCount) 个新账号需要官方登录验证"
+        }
         return preview
     }
 

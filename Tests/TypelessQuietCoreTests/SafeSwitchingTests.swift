@@ -4,6 +4,20 @@ import XCTest
 final class SafeSwitchingTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 20_000)
 
+    func testManualLoginCanVerifyUnknownTargetWithoutClaimingIdle() throws {
+        let fixture = try makeFixture()
+        var target = fixture.targetAccount
+        target.status = .unknown
+        var state = fixture.currentState
+        state.activity = .unknown
+        state.quota = nil
+        XCTAssertNoThrow(try SwitchPolicy.preflight(SwitchPreflightInput(
+            accounts: [fixture.currentAccount, target], currentState: state,
+            typelessRunning: true, targetAccountID: target.id, source: .manual,
+            hasActiveTransaction: false, now: now)))
+        XCTAssertEqual(state.activity, .unknown)
+    }
+
     func testActivityDetectorRequiresExplicitIdleEvidence() {
         XCTAssertEqual(
             TypelessActivityDetector.detect(texts: ["Click to start dictating"]),
@@ -63,7 +77,7 @@ final class SafeSwitchingTests: XCTestCase {
                 currentState: state,
                 typelessRunning: true,
                 targetAccountID: fixture.targetAccount.id,
-                source: .manual,
+                source: .quotaGuard,
                 hasActiveTransaction: false,
                 now: now
             ))) {
@@ -194,7 +208,7 @@ final class SafeSwitchingTests: XCTestCase {
                 state: fixture.currentState,
                 now: plan.verificationDeadline
             ),
-            .requiresRollback(.originalStateUnverified)
+            .originalPreserved(.originalStateUnverified)
         )
 
         var wrong = fixture.currentState
@@ -213,7 +227,7 @@ final class SafeSwitchingTests: XCTestCase {
                 state: targetWithoutQuota,
                 now: plan.verificationDeadline
             ),
-            .requiresRollback(.verificationQuotaMissingOrStale)
+            .requiresVerification(.verificationQuotaMissingOrStale)
         )
     }
 
@@ -298,7 +312,7 @@ final class SafeSwitchingTests: XCTestCase {
             currentState: state,
             typelessRunning: true,
             targetAccountID: targetAccountID ?? fixture.targetAccount.id,
-            source: .manual,
+            source: .quotaGuard,
             hasActiveTransaction: hasActiveTransaction,
             now: now
         )), file: file, line: line) {

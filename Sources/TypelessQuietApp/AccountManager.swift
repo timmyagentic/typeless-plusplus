@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import TypelessQuietCore
 
-enum AccountDiagnosticLevel: String {
+enum AccountDiagnosticLevel: String, Codable {
     case success
     case warning
     case error
@@ -44,11 +44,14 @@ final class AccountManager: ObservableObject {
     @Published private(set) var currentReadResult: TypelessStateReadResult?
     @Published private(set) var diagnostics: [AccountDiagnosticItem] = []
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isRestartingTypeless = false
+    @Published private(set) var clientControlMessage: String?
     @Published private(set) var message: String?
 
     private let directoryStore: any AccountDirectoryStoring
     private let secretStore: any AccountSecretStoring
     private let stateReader: any TypelessCurrentStateReading
+    private let clientController: any TypelessClientControlling
     private var directoryLoadFailure: String?
 
     private enum SecretChange {
@@ -73,11 +76,13 @@ final class AccountManager: ObservableObject {
     init(
         directoryStore: any AccountDirectoryStoring,
         secretStore: any AccountSecretStoring,
-        stateReader: any TypelessCurrentStateReading
+        stateReader: any TypelessCurrentStateReading,
+        clientController: (any TypelessClientControlling)? = nil
     ) {
         self.directoryStore = directoryStore
         self.secretStore = secretStore
         self.stateReader = stateReader
+        self.clientController = clientController ?? TypelessClientController()
         do {
             directory = try directoryStore.load()
         } catch {
@@ -112,6 +117,35 @@ final class AccountManager: ObservableObject {
         return "\(identity)：额度未知"
     }
 
+    func openTypeless() {
+        if !clientController.open() { clientControlMessage = TypelessClientControlError.unavailable.localizedDescription }
+    }
+
+    func restartTypeless() {
+        guard !isRestartingTypeless else { return }
+        refresh()
+        guard let state = currentState, currentReadResult?.appRunning == true else {
+            clientControlMessage = TypelessClientControlError.unavailable.localizedDescription
+            return
+        }
+        guard state.activity != .recording, state.activity != .processing else {
+            clientControlMessage = TypelessClientControlError.busy.localizedDescription
+            return
+        }
+        isRestartingTypeless = true
+        clientControlMessage = "正在请求 Typeless 正常退出并重新打开…"
+        clientController.restart { [weak self] result in
+            guard let self else { return }
+            self.isRestartingTypeless = false
+            switch result {
+            case .success:
+                self.clientControlMessage = "Typeless 已重新打开，请在设置 → 账户核对邮箱，再回主页。"
+            case let .failure(error): self.clientControlMessage = error.localizedDescription
+            }
+            self.refresh()
+        }
+    }
+
     func addAccount(
         displayName: String,
         email: String,
@@ -122,11 +156,13 @@ final class AccountManager: ObservableObject {
             displayName: displayName,
             email: email,
             note: note,
+            status: .unknown,
             hasSecret: !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         )
         if let state = currentState,
            state.email == account.email {
             account.quota = state.quota
+            if state.quota?.isFresh() == true { account.status = .available }
         }
 
         var candidate = directory
@@ -149,7 +185,7 @@ final class AccountManager: ObservableObject {
         var account = try AccountProfile(
             displayName: state.displayName ?? email,
             email: email,
-            status: .available,
+            status: state.quota?.isFresh() == true ? .available : .unknown,
             quota: state.quota
         )
         account.updatedAt = Date()
@@ -174,12 +210,13 @@ final class AccountManager: ObservableObject {
             throw AccountDirectoryError.accountNotFound
         }
 
+        let identityChanged = AccountProfile.normalizedEmail(email) != existing.email
         let replacementSecret = newSecret.flatMap {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
         }
         let secretChange: SecretChange?
         let hasSecret: Bool
-        if clearSecret {
+        if clearSecret || (identityChanged && replacementSecret == nil) {
             secretChange = .delete(accountID: id)
             hasSecret = false
         } else if let replacementSecret {
@@ -190,14 +227,15 @@ final class AccountManager: ObservableObject {
             hasSecret = existing.hasSecret
         }
 
+        let retainedQuota = identityChanged ? nil : existing.quota
         let updated = try AccountProfile(
             id: id,
             displayName: displayName,
             email: email,
             note: note,
-            status: status,
-            autoSwitchEligible: autoSwitchEligible,
-            quota: existing.quota,
+            status: status == .available && retainedQuota == nil ? .unknown : status,
+            autoSwitchEligible: identityChanged ? false : autoSwitchEligible,
+            quota: retainedQuota,
             hasSecret: hasSecret,
             createdAt: existing.createdAt,
             updatedAt: Date()
@@ -213,7 +251,7 @@ final class AccountManager: ObservableObject {
         guard var account = directory.accounts.first(where: { $0.id == accountID }) else {
             throw AccountDirectoryError.accountNotFound
         }
-        account.status = paused ? .paused : .available
+        account.status = paused ? .paused : (account.quota == nil ? .unknown : .available)
         account.updatedAt = Date()
         var candidate = directory
         try candidate.update(account)
@@ -247,10 +285,10 @@ final class AccountManager: ObservableObject {
             currentState = nil
             message = "Typeless 状态读取失败：\(error.localizedDescription)"
         }
-        performSelfCheck()
+        performSelfCheck(checkSecrets: false)
     }
 
-    func performSelfCheck() {
+    func performSelfCheck(checkSecrets: Bool = true) {
         var items: [AccountDiagnosticItem] = []
         let parent = directoryStore.fileURL.deletingLastPathComponent()
         if let directoryLoadFailure {
@@ -271,33 +309,38 @@ final class AccountManager: ObservableObject {
             ))
         }
 
-        do {
-            for account in directory.accounts {
-                let actual = try secretStore.containsSecret(accountID: account.id)
-                if actual != account.hasSecret {
+        let cachedSecretChecks = diagnostics.filter { $0.id == "keychain" || $0.id.hasPrefix("secret-") }
+        if !checkSecrets, !cachedSecretChecks.isEmpty {
+            items.append(contentsOf: cachedSecretChecks)
+        } else {
+            do {
+                for account in directory.accounts {
+                    let actual = try secretStore.containsSecret(accountID: account.id)
+                    if actual != account.hasSecret {
+                        items.append(AccountDiagnosticItem(
+                            id: "secret-\(account.id)",
+                            title: "Keychain 状态不一致",
+                            detail: "账号 \(account.displayName) 的秘密标记需要重新保存",
+                            level: .warning
+                        ))
+                    }
+                }
+                if !items.contains(where: { $0.id.hasPrefix("secret-") }) {
                     items.append(AccountDiagnosticItem(
-                        id: "secret-\(account.id)",
-                        title: "Keychain 状态不一致",
-                        detail: "账号 \(account.displayName) 的秘密标记需要重新保存",
-                        level: .warning
+                        id: "keychain",
+                        title: "Keychain",
+                        detail: "按账号 UUID 隔离，未在账号 JSON 中保存秘密",
+                        level: .success
                     ))
                 }
-            }
-            if !items.contains(where: { $0.id.hasPrefix("secret-") }) {
+            } catch {
                 items.append(AccountDiagnosticItem(
                     id: "keychain",
                     title: "Keychain",
-                    detail: "按账号 UUID 隔离，未在账号 JSON 中保存秘密",
-                    level: .success
+                    detail: error.localizedDescription,
+                    level: .error
                 ))
             }
-        } catch {
-            items.append(AccountDiagnosticItem(
-                id: "keychain",
-                title: "Keychain",
-                detail: error.localizedDescription,
-                level: .error
-            ))
         }
 
         if let result = currentReadResult {
@@ -353,11 +396,19 @@ final class AccountManager: ObservableObject {
         _ quota: QuotaSnapshot?,
         provenance: TypelessQuotaReadProvenance
     ) -> String {
+        if provenance == .requiresClientRestart {
+            return "尚不能确认额度归属：首次读取、重新启动或同进程换号后，请停止录音并重启 Typeless，再核对账户"
+        }
+        if provenance == .awaitingIdentityConfirmation {
+            return "请打开 Typeless 设置 → 账户核对邮箱，再回主页；核对前不将界面额度归到此账号"
+        }
         guard let quota else {
             return "Typeless 官方主界面和白名单本地字段都未暴露额度，显示为未知"
         }
         let source = switch provenance {
         case .unavailable: "未知来源"
+        case .awaitingIdentityConfirmation: "等待核对官方账号"
+        case .requiresClientRestart: "等待重启 Typeless"
         case .localStorage: "Typeless 只读本地状态"
         case .visibleAccessibility: "Typeless 官方可见周额度"
         case .cachedAccessibility:
@@ -381,7 +432,7 @@ final class AccountManager: ObservableObject {
         case .idle: "已读取到明确的空闲控件，可执行切换 preflight"
         case .recording: "Typeless 正在录音，禁止切换"
         case .processing: "Typeless 正在处理转录，禁止切换"
-        case .unknown: "无法证明 Typeless 空闲，切换将 fail closed"
+        case .unknown: "当前版本未暴露活动状态；可手动打开官方登录，自动切换暂停"
         }
     }
 
@@ -392,10 +443,18 @@ final class AccountManager: ObservableObject {
         else {
             return
         }
+        let previous = account
+        if let saved = account.quota, account.status != .unknown,
+           saved.usedCharacters == quota.usedCharacters,
+           saved.limitCharacters == quota.limitCharacters, saved.source == quota.source,
+           saved.isFresh(at: quota.observedAt, maximumAge: 15) {
+            return
+        }
         account.quota = quota
         if account.status == .unknown, quota.isFresh() {
             account.status = .available
         }
+        guard account != previous else { return }
         account.updatedAt = Date()
         var candidate = directory
         try candidate.update(account)

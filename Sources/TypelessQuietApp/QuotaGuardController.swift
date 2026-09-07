@@ -219,10 +219,12 @@ final class QuotaGuardController: ObservableObject {
 
     func evaluateNow() {
         guard storageError == nil else { return }
-        let checkedAt = now()
-        lastCheckedAt = checkedAt
         lastSwitchOutcome = nil
         accountManager.refresh()
+        // A visible quota receives its timestamp during refresh. Evaluate afterwards
+        // so a genuinely new observation is not rejected as coming from the future.
+        let checkedAt = now()
+        lastCheckedAt = checkedAt
         let result = accountManager.currentReadResult
         let decision = QuotaGuardPolicy.evaluate(QuotaGuardInput(
             configuration: document.configuration,
@@ -236,6 +238,33 @@ final class QuotaGuardController: ObservableObject {
         lastDecision = decision
         guard case let .trigger(targetAccountID) = decision else { return }
 
+        beginAttempt(targetAccountID: targetAccountID, source: .quotaGuard, checkedAt: checkedAt)
+    }
+
+    var recommendedAccountID: UUID? {
+        guard case let .needsManualVerification(id) = lastDecision else { return nil }
+        return id
+    }
+
+    func startRecommendedSwitch() {
+        // Re-check current identity, busy state, pool and cooldown at the user's click.
+        evaluateNow()
+        guard !switchCoordinator.isBusy, let target = recommendedAccountID else { return }
+        beginAttempt(targetAccountID: target, source: .manual, checkedAt: now())
+    }
+
+    func snoozeRecommendation() {
+        guard let target = recommendedAccountID else { return }
+        var copy = document
+        copy.runtime.lastAttemptAt = now()
+        copy.runtime.lastTargetAccountID = target
+        do {
+            try commit(copy)
+            lastDecision = .noAction(.cooldown)
+        } catch { return }
+    }
+
+    private func beginAttempt(targetAccountID: UUID, source: SwitchSource, checkedAt: Date) {
         var attempted = document
         attempted.runtime.recordAttempt(targetAccountID: targetAccountID, at: checkedAt)
         do {
@@ -244,10 +273,10 @@ final class QuotaGuardController: ObservableObject {
             return
         }
 
-        switchCoordinator.startSwitch(to: targetAccountID, source: .quotaGuard)
+        switchCoordinator.startSwitch(to: targetAccountID, source: source)
         guard let operation = switchCoordinator.operation,
               operation.targetAccountID == targetAccountID,
-              operation.source == .quotaGuard
+              operation.source == source
         else {
             recordAttemptResult(succeeded: false, at: now())
             return
