@@ -272,6 +272,10 @@ final class AccountManager: ObservableObject {
         defer { isRefreshing = false }
         do {
             let result = try stateReader.read()
+            if !isRestartingTypeless,
+               currentState?.email != result.state.email || result.state.quota?.isFresh() == true {
+                clientControlMessage = nil
+            }
             currentReadResult = result
             currentState = result.state
             message = nil

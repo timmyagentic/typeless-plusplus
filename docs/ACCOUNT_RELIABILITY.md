@@ -17,6 +17,7 @@
 | R8 新额度被守护误判为过期 | 检查时间先于读取，刚生成的额度时间略晚，被当作未来数据 | 在读取完成后取检查时间；保留严格的新鲜度边界 | `testNewlyReadQuotaIsEvaluatedAfterObservationCompletes`；真实新额度低于临时阈值时正确建议 | 通过 |
 | R9 账号与守护行控件不可独立访问 | 原生 List 将按钮和输入控件合并为整行 | 使用可滚动的独立控件；阈值与冷却可直接输入 | 原生 AX 前后对照；真实编辑、删除、账号池、数字输入和提醒按钮操作 | 通过 |
 | R10 合并已有账号仍提示全部重新登录 | 导入成功提示无条件附加登录要求 | 仅有新增待验证账号时附加数量与登录提示 | `BackupControllerTests`；最终构建真实无新增合并保留 UUID、资料和本机额度，守护强制关闭且提示准确 | 通过 |
+| R11 旧操作提示残留到下一次登录 | 重启成功提示未随邮箱或额度确认清除；恢复成功详情仍复用停止跟踪文案 | 按身份与额度确认清除旧重启提示；恢复结果和主动停止分别说明 | `testRestartGuidanceDoesNotSurviveAnotherIdentityOrConfirmedQuota` 已保留 RED/GREEN；真实继续验证及主动恢复完成 | 通过；最终构建往返复核中 |
 
 ## 三项增强
 
@@ -28,7 +29,7 @@
 
 ## 验证状态
 
-2026-09-07 本机完整 `make verify`：171 项 Swift 测试，4 项显式 opt-in 现场检查跳过，
+2026-09-07 本机完整 `make verify`：172 项 Swift 测试，4 项显式 opt-in 现场检查跳过，
 0 失败；8 项 Python 校验通过。Debug / Release warnings-as-errors、Developer ID 签名、
 包结构及旧品牌迁移通过。失败回归与对应通过日志保存在本轮任务的验证材料中。
 

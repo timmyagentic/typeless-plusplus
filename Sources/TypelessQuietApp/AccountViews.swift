@@ -385,6 +385,12 @@ struct SwitchStatusCard: View {
         case .succeeded:
             return "目标邮箱和新鲜额度均已从 Typeless 官方界面确认。"
         case .failed:
+            if operation.outcome == .originalRestored {
+                return "已通过 Typeless 官方界面重新确认原邮箱和新鲜额度，恢复完成。"
+            }
+            if operation.outcome == .cancelled {
+                return "已停止跟踪。官网尚未完成的登录仍可能生效，请关闭不用的登录页。"
+            }
             return operation.failureCode?.userMessage ?? "切换没有完成。"
         }
     }
@@ -695,7 +701,7 @@ private extension SwitchFailureCode {
         case .verificationObservedDifferentAccount: "Typeless 显示了非目标账号，已启动官方恢复。"
         case .verificationQuotaMissingOrStale: "已看到目标邮箱，额度仍待核对。请刷新官方客户端后继续验证，或选择恢复原账号。"
         case .originalStateUnverified: "仍看到原邮箱，额度尚未核对；请在官方客户端确认后重试。"
-        case .cancelled: "已停止跟踪。官网尚未完成的登录仍可能生效，请关闭不用的登录页。"
+        case .cancelled: "用户已取消本次切换。"
         case .rollbackOpenFailed: "未能打开官方恢复页，请点击重新打开并登录原账号。"
         case .rollbackTimedOut: "尚未验证原账号恢复，请重新打开官方页面继续恢复。"
         case .auditWriteFailed: "切换审计不可写，验证已停止；请检查诊断后重试。"

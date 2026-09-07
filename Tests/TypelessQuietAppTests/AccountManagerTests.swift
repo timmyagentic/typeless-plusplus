@@ -66,6 +66,13 @@ private struct StubStateReader: TypelessCurrentStateReading {
     func read() throws -> TypelessStateReadResult { result }
 }
 
+private final class MutableAccountStateReader: TypelessCurrentStateReading, @unchecked Sendable {
+    var result: TypelessStateReadResult
+
+    init(result: TypelessStateReadResult) { self.result = result }
+    func read() throws -> TypelessStateReadResult { result }
+}
+
 @MainActor
 private final class FakeTypelessClientController: TypelessClientControlling {
     var restartCount = 0
@@ -78,6 +85,41 @@ private final class FakeTypelessClientController: TypelessClientControlling {
 
 @MainActor
 final class AccountManagerTests: XCTestCase {
+    func testRestartGuidanceDoesNotSurviveAnotherIdentityOrConfirmedQuota() {
+        for confirmsQuota in [false, true] {
+            let initial = makeReadResult()
+            var pendingState = initial.state
+            pendingState.quota = nil
+            let reader = MutableAccountStateReader(result: TypelessStateReadResult(
+                state: pendingState, storageURL: initial.storageURL,
+                appVersion: "2.5.0", appRunning: true,
+                quotaProvenance: .requiresClientRestart
+            ))
+            let manager = AccountManager(directoryStore: FakeDirectoryStore(),
+                secretStore: FakeSecretStore(), stateReader: reader,
+                clientController: FakeTypelessClientController())
+            manager.restartTypeless()
+            XCTAssertNotNil(manager.clientControlMessage)
+            manager.refresh()
+            XCTAssertNotNil(manager.clientControlMessage)
+
+            let resolvedState = CurrentTypelessState(
+                email: confirmsQuota ? pendingState.email : "another@example.com",
+                displayName: nil, planName: "Free",
+                quota: confirmsQuota ? QuotaSnapshot(usedCharacters: 100, limitCharacters: 8_000,
+                    observedAt: Date(), source: .typelessAccessibility) : nil,
+                observedAt: Date(), sourceModifiedAt: Date()
+            )
+            reader.result = TypelessStateReadResult(state: resolvedState,
+                storageURL: initial.storageURL, appVersion: "2.5.0", appRunning: true,
+                quotaProvenance: confirmsQuota ? .visibleAccessibility : .requiresClientRestart)
+            manager.refresh()
+
+            XCTAssertNil(manager.clientControlMessage,
+                "Previous restart guidance must not reappear for another login or after quota confirmation")
+        }
+    }
+
     func testExplicitRestartProtectsRecordingAndProcessingButDoesNotInventIdle() {
         for activity in [TypelessActivityState.recording, .processing, .unknown] {
             let original = makeReadResult()
