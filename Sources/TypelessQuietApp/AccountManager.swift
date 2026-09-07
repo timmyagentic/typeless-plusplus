@@ -53,6 +53,7 @@ final class AccountManager: ObservableObject {
     private let stateReader: any TypelessCurrentStateReading
     private let clientController: any TypelessClientControlling
     private var directoryLoadFailure: String?
+    private var quotaExpiryTimer: Timer?
 
     private enum SecretChange {
         case save(accountID: UUID, value: String)
@@ -99,6 +100,8 @@ final class AccountManager: ObservableObject {
     }
 
     var accounts: [AccountProfile] { directory.accounts }
+
+    deinit { quotaExpiryTimer?.invalidate() }
 
     var currentAccountIsManaged: Bool {
         guard let email = currentState?.email else { return false }
@@ -384,6 +387,29 @@ final class AccountManager: ObservableObject {
             ))
         }
         diagnostics = items
+        scheduleQuotaExpiry()
+    }
+
+    private func scheduleQuotaExpiry() {
+        quotaExpiryTimer?.invalidate()
+        quotaExpiryTimer = nil
+        let now = Date()
+        let snapshots = directory.accounts.compactMap(\.quota) + [currentState?.quota].compactMap { $0 }
+        guard let nextExpiry = snapshots
+            .filter({ $0.isFresh(at: now) })
+            .map({ $0.observedAt.addingTimeInterval(QuotaSnapshot.defaultMaximumAge) })
+            .min()
+        else { return }
+
+        // A one-shot display update, just past the inclusive freshness boundary.
+        // Never reread Typeless, persist quotas, or touch Keychain merely because time elapsed.
+        let timer = Timer(fire: nextExpiry.addingTimeInterval(0.01), interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.performSelfCheck(checkSecrets: false)
+            }
+        }
+        quotaExpiryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func reportOperationFailure(_ context: String, error: Error) {
