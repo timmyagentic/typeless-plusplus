@@ -61,6 +61,61 @@ private final class SwitchTestClock {
 final class SwitchCoordinatorTests: XCTestCase {
     private let initialDate = Date(timeIntervalSince1970: 30_000)
 
+    func testTargetWithoutQuotaTimeoutDoesNotOpenOriginalLoginAndCanResume() throws {
+        let fixture = try makeFixture()
+        fixture.coordinator.startSwitch(to: fixture.target.id)
+        var target = fixture.makeState(fixture.target, initialDate.addingTimeInterval(1))
+        target.quota = nil
+        fixture.reader.result = TypelessStateReadResult(state: target,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        fixture.clock.date = try XCTUnwrap(fixture.coordinator.operation?.verificationDeadline)
+        fixture.coordinator.pollOnce()
+        XCTAssertFalse(fixture.coordinator.isBusy)
+        XCTAssertEqual(fixture.opener.openCount, 1)
+        XCTAssertEqual(fixture.coordinator.operation?.failureCode, .verificationQuotaMissingOrStale)
+        XCTAssertEqual(fixture.coordinator.operation?.outcome, .verificationRequired)
+        fixture.coordinator.resumeVerification()
+        XCTAssertTrue(fixture.coordinator.isBusy)
+        XCTAssertEqual(fixture.opener.openCount, 1)
+        fixture.clock.date = fixture.clock.date.addingTimeInterval(1)
+        fixture.reader.result = fixture.result(account: fixture.target, quotaObservedAt: fixture.clock.date)
+        fixture.coordinator.pollOnce()
+        XCTAssertEqual(fixture.coordinator.operation?.outcome, .succeeded)
+
+    }
+
+    func testCancelBeforeAnyLoginPreservesOriginalEvenWhenQuotaUnavailable() throws {
+        let fixture = try makeFixture()
+        fixture.coordinator.startSwitch(to: fixture.target.id)
+        var current = fixture.makeState(fixture.current, initialDate)
+        current.quota = nil
+        fixture.reader.result = TypelessStateReadResult(state: current,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        fixture.coordinator.cancelAndRestore()
+        XCTAssertFalse(fixture.coordinator.isBusy)
+        XCTAssertEqual(fixture.coordinator.operation?.outcome, .cancelled)
+        XCTAssertEqual(fixture.opener.openCount, 1)
+    }
+
+    func testResumeAuditFailureDoesNotClaimOriginalAccountWasPreserved() throws {
+        let fixture = try makeFixture()
+        fixture.coordinator.startSwitch(to: fixture.target.id)
+        var target = fixture.makeState(fixture.target, initialDate.addingTimeInterval(1))
+        target.quota = nil
+        fixture.reader.result = TypelessStateReadResult(state: target,
+            storageURL: fixture.reader.result.storageURL, appVersion: "2.5.0", appRunning: true)
+        fixture.clock.date = try XCTUnwrap(fixture.coordinator.operation?.verificationDeadline)
+        fixture.coordinator.pollOnce()
+        fixture.audit.failAppend = true
+
+        fixture.coordinator.resumeVerification()
+
+        XCTAssertEqual(fixture.coordinator.operation?.outcome, .verificationRequired)
+        XCTAssertEqual(fixture.coordinator.operation?.failureCode, .auditWriteFailed)
+        XCTAssertFalse(fixture.coordinator.isBusy)
+        XCTAssertEqual(fixture.opener.openCount, 1)
+    }
+
     func testOfficialLoginURLIsFixedHTTPSAndContainsNoCredentials() {
         let value = OfficialTypelessLoginOpener.defaultLoginURL.absoluteString
 

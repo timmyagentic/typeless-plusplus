@@ -37,6 +37,10 @@ struct TypelessQuietApplication: App {
             }
 
             Text(model.quotaGuardController.menuSummary)
+            if model.quotaGuardController.recommendedAccountID != nil {
+                Button("登录验证备用账号") { model.quotaGuardController.startRecommendedSwitch() }
+                Button("稍后提醒") { model.quotaGuardController.snoozeRecommendation() }
+            }
 
             if let lastDismissal = model.lastDismissal {
                 Text("上次关闭：\(lastDismissal.formatted(date: .abbreviated, time: .standard))")
@@ -53,7 +57,7 @@ struct TypelessQuietApplication: App {
             }
 
             let switchableAccounts = model.accountManager.accounts.filter {
-                $0.status == .available && $0.email != model.accountManager.currentState?.email
+                ($0.status == .available || $0.status == .unknown) && $0.email != model.accountManager.currentState?.email
             }
             if !switchableAccounts.isEmpty {
                 Menu("安全切换账号") {

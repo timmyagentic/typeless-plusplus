@@ -26,6 +26,7 @@ final class QuietModel: ObservableObject {
     private let launchAtLoginInitializedKey = "InitialSetup.LaunchAtLogin.v1"
     private let initialSetupPolicy = InitialSetupPolicy()
     private var permissionTimer: Timer?
+    private var accountStateMonitor: TypelessStateMonitor?
     private var accountUpdates: AnyCancellable?
     private var switchUpdates: AnyCancellable?
     private var quotaGuardUpdates: AnyCancellable?
@@ -78,6 +79,14 @@ final class QuietModel: ObservableObject {
         accessibilityGranted = AXIsProcessTrusted()
         refreshLaunchAtLoginStatus()
         performInitialSetup()
+        let stateMonitor = TypelessStateMonitor(
+            storageURL: resolvedAccountManager.currentReadResult?.storageURL
+                ?? TypelessCurrentStateReader.storageCandidates[0]
+        ) { [weak resolvedAccountManager] in
+            resolvedAccountManager?.refresh()
+        }
+        accountStateMonitor = stateMonitor
+        stateMonitor.start()
         monitor.start()
         monitor.setWatchingAllowed(isEnabled && accessibilityGranted)
 
@@ -120,6 +129,9 @@ final class QuietModel: ObservableObject {
     }
 
     var statusSymbol: String {
+        if quotaGuardController.recommendedAccountID != nil {
+            return "person.crop.circle.badge.exclamationmark"
+        }
         if issueText != nil {
             return "exclamationmark.triangle.fill"
         }

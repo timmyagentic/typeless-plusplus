@@ -29,6 +29,8 @@ public enum QuotaSource: String, Codable, Sendable {
 }
 
 public struct QuotaSnapshot: Codable, Equatable, Sendable {
+    public static let defaultMaximumAge: TimeInterval = 300
+
     public var usedCharacters: Int
     public var limitCharacters: Int
     public var observedAt: Date
@@ -50,7 +52,7 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         max(0, limitCharacters - usedCharacters)
     }
 
-    public func isFresh(at date: Date = Date(), maximumAge: TimeInterval = 300) -> Bool {
+    public func isFresh(at date: Date = Date(), maximumAge: TimeInterval = Self.defaultMaximumAge) -> Bool {
         let age = date.timeIntervalSince(observedAt)
         return age >= 0 && age <= maximumAge
     }

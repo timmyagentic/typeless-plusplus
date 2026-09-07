@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import TypelessQuietApp
@@ -8,9 +9,11 @@ private final class FakeSecretStore: AccountSecretStoring, @unchecked Sendable {
     var failNextRead = false
     var failNextSave = false
     var failNextDelete = false
+    var containsCount = 0
 
     func containsSecret(accountID: UUID) throws -> Bool {
-        values[accountID] != nil
+        containsCount += 1
+        return values[accountID] != nil
     }
 
     func readSecret(accountID: UUID) throws -> String? {
@@ -48,10 +51,12 @@ private final class FakeDirectoryStore: AccountDirectoryStoring, @unchecked Send
         .appendingPathComponent("accounts.json")
     var stored = try! AccountDirectory()
     var failNextSave = false
+    var saveCount = 0
 
     func load() throws -> AccountDirectory { stored }
 
     func save(_ directory: AccountDirectory) throws {
+        saveCount += 1
         if failNextSave {
             failNextSave = false
             throw TestFailure.injected
@@ -66,8 +71,156 @@ private struct StubStateReader: TypelessCurrentStateReading {
     func read() throws -> TypelessStateReadResult { result }
 }
 
+private final class MutableAccountStateReader: TypelessCurrentStateReading, @unchecked Sendable {
+    var result: TypelessStateReadResult
+    var readCount = 0
+
+    init(result: TypelessStateReadResult) { self.result = result }
+    func read() throws -> TypelessStateReadResult {
+        readCount += 1
+        return result
+    }
+}
+
+@MainActor
+private final class FakeTypelessClientController: TypelessClientControlling {
+    var restartCount = 0
+    func open() -> Bool { true }
+    func restart(completion: @escaping (Result<Void, Error>) -> Void) {
+        restartCount += 1
+        completion(.success(()))
+    }
+}
+
 @MainActor
 final class AccountManagerTests: XCTestCase {
+    func testStationaryWindowUpdatesEachQuotaExpiryWithoutReadingOrSaving() async throws {
+        let original = makeReadResult()
+        var state = original.state
+        let now = Date()
+        let currentQuota = QuotaSnapshot(usedCharacters: 100, limitCharacters: 8_000,
+            observedAt: now.addingTimeInterval(-299.6), source: .typelessAccessibility)
+        let alternateQuota = QuotaSnapshot(usedCharacters: 200, limitCharacters: 8_000,
+            observedAt: now.addingTimeInterval(-299.1), source: .typelessAccessibility)
+        state.quota = currentQuota
+        let reader = MutableAccountStateReader(result: TypelessStateReadResult(
+            state: state, storageURL: original.storageURL, appVersion: "2.5.0", appRunning: true,
+            quotaProvenance: .cachedAccessibility))
+        let store = FakeDirectoryStore()
+        store.stored = try AccountDirectory(accounts: [
+            AccountProfile(displayName: "Alternate", email: "alternate@example.com", quota: alternateQuota)
+        ])
+        let secrets = FakeSecretStore()
+        let manager = AccountManager(directoryStore: store, secretStore: secrets, stateReader: reader)
+        let savedDirectory = manager.directory
+        let readCount = reader.readCount
+        let saveCount = store.saveCount
+        let secretChecks = secrets.containsCount
+        XCTAssertEqual(manager.diagnostics.first { $0.id == "quota" }?.level, .success)
+        let currentExpired = expectation(description: "Current quota expiry notifies the stationary view")
+        let alternateExpired = expectation(description: "Later alternate quota expiry also notifies the view")
+        var confirmedCurrent = false
+        var confirmedAlternate = false
+        let updates = manager.$diagnostics.dropFirst().sink { items in
+            if !currentQuota.isFresh(), !confirmedCurrent {
+                confirmedCurrent = true
+                XCTAssertEqual(items.first { $0.id == "quota" }?.level, .warning)
+                currentExpired.fulfill()
+            }
+            if !alternateQuota.isFresh(), !confirmedAlternate {
+                confirmedAlternate = true
+                alternateExpired.fulfill()
+            }
+        }
+        await fulfillment(of: [currentExpired, alternateExpired], timeout: 2)
+        updates.cancel()
+        XCTAssertTrue(manager.menuSummary?.contains("额度已过期") == true)
+        XCTAssertEqual(manager.currentState?.quota, currentQuota)
+        XCTAssertEqual(manager.directory, savedDirectory)
+        XCTAssertEqual(reader.readCount, readCount, "Expiry must not poll Typeless")
+        XCTAssertEqual(store.saveCount, saveCount, "Expiry must preserve original timestamps")
+        XCTAssertEqual(secrets.containsCount, secretChecks, "Expiry must not query Keychain")
+        let noFurtherUpdates = expectation(description: "No repeating work after all snapshots expire")
+        noFurtherUpdates.isInverted = true
+        let settledUpdates = manager.objectWillChange.sink { noFurtherUpdates.fulfill() }
+        await fulfillment(of: [noFurtherUpdates], timeout: 0.3)
+        settledUpdates.cancel()
+    }
+
+    func testRestartGuidanceDoesNotSurviveAnotherIdentityOrConfirmedQuota() {
+        for confirmsQuota in [false, true] {
+            let initial = makeReadResult()
+            var pendingState = initial.state
+            pendingState.quota = nil
+            let reader = MutableAccountStateReader(result: TypelessStateReadResult(
+                state: pendingState, storageURL: initial.storageURL,
+                appVersion: "2.5.0", appRunning: true,
+                quotaProvenance: .requiresClientRestart
+            ))
+            let manager = AccountManager(directoryStore: FakeDirectoryStore(),
+                secretStore: FakeSecretStore(), stateReader: reader,
+                clientController: FakeTypelessClientController())
+            manager.restartTypeless()
+            XCTAssertNotNil(manager.clientControlMessage)
+            manager.refresh()
+            XCTAssertNotNil(manager.clientControlMessage)
+
+            let resolvedState = CurrentTypelessState(
+                email: confirmsQuota ? pendingState.email : "another@example.com",
+                displayName: nil, planName: "Free",
+                quota: confirmsQuota ? QuotaSnapshot(usedCharacters: 100, limitCharacters: 8_000,
+                    observedAt: Date(), source: .typelessAccessibility) : nil,
+                observedAt: Date(), sourceModifiedAt: Date()
+            )
+            reader.result = TypelessStateReadResult(state: resolvedState,
+                storageURL: initial.storageURL, appVersion: "2.5.0", appRunning: true,
+                quotaProvenance: confirmsQuota ? .visibleAccessibility : .requiresClientRestart)
+            manager.refresh()
+
+            XCTAssertNil(manager.clientControlMessage,
+                "Previous restart guidance must not reappear for another login or after quota confirmation")
+        }
+    }
+
+    func testExplicitRestartProtectsRecordingAndProcessingButDoesNotInventIdle() {
+        for activity in [TypelessActivityState.recording, .processing, .unknown] {
+            let original = makeReadResult()
+            var state = original.state
+            state.activity = activity
+            let result = TypelessStateReadResult(state: state, storageURL: original.storageURL,
+                appVersion: "2.5.0", appRunning: true)
+            let controller = FakeTypelessClientController()
+            let manager = AccountManager(directoryStore: FakeDirectoryStore(),
+                secretStore: FakeSecretStore(), stateReader: StubStateReader(result: result),
+                clientController: controller)
+
+            manager.restartTypeless()
+
+            XCTAssertEqual(controller.restartCount, activity == .unknown ? 1 : 0)
+            XCTAssertEqual(manager.currentState?.activity, activity)
+            XCTAssertFalse(manager.isRestartingTypeless)
+        }
+    }
+
+    func testManualEntryRemainsUnverifiedAndEmailEditClearsQuota() throws {
+        let fixture = try makeFixture()
+        try fixture.manager.addAccount(displayName: "New", email: "new@example.com", note: "", secret: "")
+        let newAccount = try XCTUnwrap(fixture.manager.accounts.first { $0.email == "new@example.com" })
+        XCTAssertEqual(newAccount.status, .unknown)
+        try fixture.manager.setPaused(true, accountID: newAccount.id)
+        try fixture.manager.setPaused(false, accountID: newAccount.id)
+        XCTAssertEqual(fixture.manager.accounts.first { $0.id == newAccount.id }?.status, .unknown)
+
+        try fixture.manager.addCurrentAccount()
+        let current = try XCTUnwrap(fixture.manager.accounts.first { $0.email == "person@example.com" })
+        try fixture.manager.updateAccount(id: current.id, displayName: "Edited", email: "edited@example.com",
+            note: "", status: .available, autoSwitchEligible: true, newSecret: nil, clearSecret: false)
+        let edited = try XCTUnwrap(fixture.manager.accounts.first { $0.id == current.id })
+        XCTAssertNil(edited.quota)
+        XCTAssertEqual(edited.status, .unknown)
+        XCTAssertFalse(edited.autoSwitchEligible)
+    }
+
     func testAddsAccountAndKeepsSecretOutOfJSON() throws {
         let fixture = try makeFixture()
         let manager = fixture.manager
