@@ -17,7 +17,14 @@ final class TypelessStateMonitor: NSObject {
     private let observesApplications: Bool
     private var directorySource: DispatchSourceFileSystemObject?
     private var watchedDirectory: URL?
-    private var storageStamp: Date?
+    private var fileSources: [URL: DispatchSourceFileSystemObject] = [:]
+    private var storageStamps: [URL: Date] = [:]
+
+    private var observedFiles: [URL] {
+        let directory = storageURL.deletingLastPathComponent()
+        return [storageURL] + ["user-data.json", "typeless.db", "typeless.db-wal",
+            "transcription-history-sync-state.json"].map { directory.appendingPathComponent($0) }
+    }
     private var pendingRefresh: DispatchWorkItem?
     private var observer: AXObserver?
     private var processID: pid_t?
@@ -45,6 +52,7 @@ final class TypelessStateMonitor: NSObject {
                          NSWorkspace.didActivateApplicationNotification] {
                 center.addObserver(self, selector: #selector(applicationChanged), name: name, object: nil)
             }
+            center.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
             reconcileObserver()
         }
         scheduleRefresh()
@@ -57,9 +65,13 @@ final class TypelessStateMonitor: NSObject {
         directorySource?.cancel()
         directorySource = nil
         watchedDirectory = nil
+        fileSources.values.forEach { $0.cancel() }
+        fileSources.removeAll()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         detachObserver()
     }
+
+    @objc private func didWake(_ notification: Notification) { scheduleRefresh() }
 
     @objc private func applicationChanged(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
@@ -83,6 +95,7 @@ final class TypelessStateMonitor: NSObject {
     }
 
     private func attachDirectory() {
+        attachFiles()
         var directory = storageURL.deletingLastPathComponent()
         while !FileManager.default.fileExists(atPath: directory.path), directory.path != "/" {
             directory.deleteLastPathComponent()
@@ -92,7 +105,7 @@ final class TypelessStateMonitor: NSObject {
         let descriptor = open(directory.path, O_EVTONLY)
         guard descriptor >= 0 else { return }
         watchedDirectory = directory
-        storageStamp = modificationDate()
+        storageStamps = modificationDates()
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main
         )
@@ -102,9 +115,9 @@ final class TypelessStateMonitor: NSObject {
             if self.watchedDirectory != self.storageURL.deletingLastPathComponent() {
                 self.scheduleRefresh()
             }
-            let changedAt = self.modificationDate()
-            if self.storageStamp != changedAt {
-                self.storageStamp = changedAt
+            let changedAt = self.modificationDates()
+            if self.storageStamps != changedAt {
+                self.storageStamps = changedAt
                 self.scheduleRefresh()
             }
             if self.directorySource?.data.contains(.rename) == true || self.directorySource?.data.contains(.delete) == true {
@@ -116,8 +129,32 @@ final class TypelessStateMonitor: NSObject {
         source.resume()
     }
 
-    private func modificationDate() -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: storageURL.path)[.modificationDate]) as? Date
+    private func modificationDates() -> [URL: Date] {
+        Dictionary(uniqueKeysWithValues: observedFiles.compactMap { file in
+            guard let date = (try? FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate]) as? Date
+            else { return nil }
+            return (file, date)
+        })
+    }
+
+    private func attachFiles() {
+        for file in observedFiles where fileSources[file] == nil {
+            let descriptor = open(file.path, O_EVTONLY)
+            guard descriptor >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor,
+                eventMask: [.write, .rename, .delete], queue: .main)
+            source.setCancelHandler { close(descriptor) }
+            source.setEventHandler { [weak self] in
+                guard let self, let current = self.fileSources[file] else { return }
+                if !current.data.intersection([.rename, .delete]).isEmpty {
+                    current.cancel()
+                    self.fileSources.removeValue(forKey: file)
+                }
+                self.scheduleRefresh()
+            }
+            fileSources[file] = source
+            source.resume()
+        }
     }
 
     private func reconcileObserver() {

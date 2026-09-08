@@ -26,6 +26,7 @@ public enum AccountStatus: String, Codable, CaseIterable, Sendable {
 public enum QuotaSource: String, Codable, Sendable {
     case typelessAccessibility
     case typelessLocalStorage
+    case typelessOfficialAPI
 }
 
 public struct QuotaSnapshot: Codable, Equatable, Sendable {

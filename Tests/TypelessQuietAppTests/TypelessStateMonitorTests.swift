@@ -4,6 +4,40 @@ import XCTest
 
 @MainActor
 final class TypelessStateMonitorTests: XCTestCase {
+    func testSessionAndUsageWritesTriggerRefreshWithoutAccountPageChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("app-storage.json")
+        let session = root.appendingPathComponent("user-data.json")
+        let usage = root.appendingPathComponent("typeless.db-wal")
+        try Data("unchanged account".utf8).write(to: file)
+        try Data("initial".utf8).write(to: session)
+        try Data("initial".utf8).write(to: usage)
+        var changes = 0
+        let monitor = TypelessStateMonitor(storageURL: file, debounceDelay: 0.02, observesApplications: false) {
+            changes += 1
+        }
+        monitor.start()
+        defer { monitor.stop() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let initialChanges = changes
+        try Data("new session".utf8).write(to: session, options: .atomic)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertGreaterThan(changes, initialChanges)
+        let afterSession = changes
+        let handle = try FileHandle(forWritingTo: usage)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("new usage".utf8))
+        try handle.close()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertGreaterThan(changes, afterSession, "In-place SQLite WAL writes must refresh quota")
+        let settled = changes
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(changes, settled, "No recurring polling")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "unchanged account")
+    }
+
     func testAtomicReplacementAndRecreationRefreshWithoutPolling() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -26,9 +26,15 @@ struct CurrentAccountCard: View {
                 if manager.isRefreshing {
                     ProgressView().controlSize(.small)
                 } else {
-                    Button("刷新") { manager.refresh() }
+                    Button("刷新") { manager.refresh(forceOfficialQuota: true) }
                 }
             }
+
+            Toggle("自动读取官方额度", isOn: Binding(
+                get: { manager.officialQuotaEnabled }, set: manager.setOfficialQuotaEnabled))
+                .toggleStyle(.switch)
+            Text("启用后无需打开 Typeless 页面。当前登录凭据仅在本机内存中用于官方查询，不保存或导出。")
+                .font(.caption).foregroundStyle(.secondary)
 
             if let state = manager.currentState {
                 HStack(alignment: .firstTextBaseline) {
@@ -99,7 +105,12 @@ struct TypelessQuotaGuidance: View {
     @ObservedObject var manager: AccountManager
 
     var body: some View {
-        if manager.currentReadResult?.quotaProvenance == .requiresClientRestart {
+        if manager.officialQuotaEnabled {
+            if let message = manager.officialQuotaMessage {
+                Label(message, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } else if manager.currentReadResult?.quotaProvenance == .requiresClientRestart {
             VStack(alignment: .leading, spacing: 8) {
                 Text("需要刷新 Typeless 登录状态").font(.callout.weight(.semibold))
                 Text("尚不能确认主页额度属于当前账号。请结束录音，再重启 Typeless；随后打开设置 → 账户核对邮箱，回到主页即可自动同步。")
@@ -377,16 +388,22 @@ struct SwitchStatusCard: View {
         case .verifying:
             let targetEmail = manager.accounts.first { $0.id == operation.targetAccountID }?.email ?? target
             if manager.currentState?.email == targetEmail {
+                if manager.officialQuotaEnabled {
+                    return "已读取到目标邮箱 \(targetEmail)，正在向官方服务核对身份与额度，完成后自动确认成功。"
+                }
                 return "已读取到目标邮箱 \(targetEmail)。请按下方提示核对额度，完成后自动确认成功。"
+            }
+            if manager.officialQuotaEnabled {
+                return "请在官方页面选择或登录 \(targetEmail)。完成桌面交接后会自动核对身份与额度。"
             }
             return "请在官方页面选择或登录 \(targetEmail)。完成桌面交接后会自动读取身份；每次换号需重启 Typeless 并在账户页核对邮箱，再回主页读取额度。"
         case .restoring:
             return "官方恢复页已打开，请登录“\(original)”；验证原邮箱和新鲜额度后才算恢复完成。"
         case .succeeded:
-            return "目标邮箱和新鲜额度均已从 Typeless 官方界面确认。"
+            return "目标邮箱与新鲜额度均已确认。"
         case .failed:
             if operation.outcome == .originalRestored {
-                return "已通过 Typeless 官方界面重新确认原邮箱和新鲜额度，恢复完成。"
+                return "已重新确认原邮箱和新鲜额度，恢复完成。"
             }
             if operation.outcome == .cancelled {
                 return "已停止跟踪。官网尚未完成的登录仍可能生效，请关闭不用的登录页。"
@@ -586,7 +603,7 @@ private struct AccountEditorView: View {
             }
             .formStyle(.grouped)
 
-            Text("Typeless++ 不会把密码写入账号 JSON，也不会读取或保存 Typeless token/Cookie。")
+            Text("密码仅存于 Keychain。启用官方额度读取后，当前会话凭据仅在内存中用于官方查询，不写入账号 JSON 或备份。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
