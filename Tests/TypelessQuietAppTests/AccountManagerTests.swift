@@ -94,6 +94,33 @@ private final class FakeTypelessClientController: TypelessClientControlling {
 
 @MainActor
 final class AccountManagerTests: XCTestCase {
+    func testOfficialQuotaUpdatesWithoutPageNavigationAndDoesNotInventIdle() async throws {
+        let reader = MutableAccountStateReader(result: makeReadResult())
+        var state = reader.result.state
+        state.activity = .unknown
+        reader.result = TypelessStateReadResult(state: state, storageURL: reader.result.storageURL,
+            appVersion: "2.5.0", appRunning: true, quotaProvenance: .requiresClientRestart)
+        let fetcher = ControlledQuotaFetcher()
+        let controller = OfficialQuotaController(fetcher: fetcher, isEnabled: true, schedulesDeferredEvents: false)
+        let manager = AccountManager(directoryStore: FakeDirectoryStore(), secretStore: FakeSecretStore(),
+            stateReader: reader, officialQuota: controller)
+        XCTAssertNil(manager.currentState?.quota, "Do not trust old AX quota while server identity is pending")
+        for _ in 0..<100 where fetcher.calls.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(fetcher.calls.count, 1)
+        fetcher.succeed(0, at: Date())
+        for _ in 0..<100 where manager.isRefreshing { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(manager.currentState?.quota?.usedCharacters, 652)
+        XCTAssertEqual(manager.currentState?.quota?.source, .typelessOfficialAPI)
+        XCTAssertEqual(manager.currentState?.activity, .unknown)
+        XCTAssertEqual(manager.currentReadResult?.quotaProvenance, .officialAPI)
+        XCTAssertFalse(manager.officialQuotaMessage?.contains("重启") == true)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(fetcher.calls.count, 1, "Completion callback must not request another refresh")
+        manager.setOfficialQuotaEnabled(false)
+        XCTAssertNil(manager.officialQuotaMessage)
+        XCTAssertNotEqual(manager.currentReadResult?.quotaProvenance, .officialAPI)
+    }
+
     func testStationaryWindowUpdatesEachQuotaExpiryWithoutReadingOrSaving() async throws {
         let original = makeReadResult()
         var state = original.state

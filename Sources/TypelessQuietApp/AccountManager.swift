@@ -47,11 +47,14 @@ final class AccountManager: ObservableObject {
     @Published private(set) var isRestartingTypeless = false
     @Published private(set) var clientControlMessage: String?
     @Published private(set) var message: String?
+    @Published private(set) var officialQuotaEnabled = false
+    @Published private(set) var officialQuotaMessage: String?
 
     private let directoryStore: any AccountDirectoryStoring
     private let secretStore: any AccountSecretStoring
     private let stateReader: any TypelessCurrentStateReading
     private let clientController: any TypelessClientControlling
+    private let officialQuota: OfficialQuotaController?
     private var directoryLoadFailure: String?
     private var quotaExpiryTimer: Timer?
 
@@ -67,10 +70,20 @@ final class AccountManager: ObservableObject {
     }
 
     convenience init() {
+        let storage = TypelessCurrentStateReader.storageCandidates.first {
+            FileManager.default.fileExists(atPath: $0.path)
+        } ?? TypelessCurrentStateReader.storageCandidates[0]
+        let automaticQuota = OfficialQuotaController(
+            fetcher: OfficialQuotaAPIClient(
+                sessions: OfficialQuotaSessionReader(directory: storage.deletingLastPathComponent()),
+                transport: OfficialQuotaURLSessionTransport()),
+            isEnabled: UserDefaults.standard.bool(forKey: OfficialQuotaController.preferenceKey),
+            persistEnabled: { UserDefaults.standard.set($0, forKey: OfficialQuotaController.preferenceKey) })
         self.init(
             directoryStore: Self.defaultDirectoryStore(),
             secretStore: KeychainAccountSecretStore(),
-            stateReader: TypelessCurrentStateReader()
+            stateReader: TypelessCurrentStateReader(),
+            officialQuota: automaticQuota
         )
     }
 
@@ -78,12 +91,15 @@ final class AccountManager: ObservableObject {
         directoryStore: any AccountDirectoryStoring,
         secretStore: any AccountSecretStoring,
         stateReader: any TypelessCurrentStateReading,
-        clientController: (any TypelessClientControlling)? = nil
+        clientController: (any TypelessClientControlling)? = nil,
+        officialQuota: OfficialQuotaController? = nil
     ) {
         self.directoryStore = directoryStore
         self.secretStore = secretStore
         self.stateReader = stateReader
         self.clientController = clientController ?? TypelessClientController()
+        self.officialQuota = officialQuota
+        self.officialQuotaEnabled = officialQuota?.isEnabled == true
         do {
             directory = try directoryStore.load()
         } catch {
@@ -96,6 +112,7 @@ final class AccountManager: ObservableObject {
         } catch {
             message = "Keychain 状态同步失败：\(error.localizedDescription)"
         }
+        officialQuota?.onUpdate = { [weak self] in self?.refresh(requestOfficialQuota: false) }
         refresh()
     }
 
@@ -270,11 +287,35 @@ final class AccountManager: ObservableObject {
         performSelfCheck()
     }
 
-    func refresh() {
+    func setOfficialQuotaEnabled(_ enabled: Bool) {
+        officialQuota?.setEnabled(enabled)
+        officialQuotaEnabled = officialQuota?.isEnabled == true
+        refresh()
+    }
+
+    func refresh(forceOfficialQuota: Bool = false) {
+        refresh(requestOfficialQuota: true, forceOfficialQuota: forceOfficialQuota)
+    }
+
+    private func refresh(requestOfficialQuota: Bool, forceOfficialQuota: Bool = false) {
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer { isRefreshing = officialQuota?.isRefreshing == true }
         do {
-            let result = try stateReader.read()
+            var result = try stateReader.read()
+            if let officialQuota, officialQuota.isEnabled {
+                let changed = officialQuota.observe(email: result.state.email)
+                if requestOfficialQuota || changed { officialQuota.requestRefresh(force: forceOfficialQuota) }
+                var state = result.state
+                state.quota = officialQuota.cachedQuota(for: state.email)
+                result = TypelessStateReadResult(state: state, storageURL: result.storageURL,
+                    appVersion: result.appVersion, appRunning: result.appRunning, quotaProvenance: .officialAPI)
+                officialQuotaMessage = officialQuota.failure?.localizedDescription
+                    ?? (officialQuota.isRefreshing ? "正在向官方服务核对账号与额度…"
+                        : state.quota == nil ? "等待当前登录会话可用后自动同步。"
+                        : "已核对当前账号；登录或使用记录变化时自动同步。")
+            } else {
+                officialQuotaMessage = nil
+            }
             if !isRestartingTypeless,
                currentState?.email != result.state.email || result.state.quota?.isFresh() == true {
                 clientControlMessage = nil
@@ -288,6 +329,8 @@ final class AccountManager: ObservableObject {
                 message = "当前额度已读取，但账号目录更新失败：\(error.localizedDescription)"
             }
         } catch {
+            officialQuota?.observe(email: nil)
+            officialQuotaMessage = officialQuota?.isEnabled == true ? officialQuota?.failure?.localizedDescription : nil
             currentReadResult = nil
             currentState = nil
             message = "Typeless 状态读取失败：\(error.localizedDescription)"
@@ -426,6 +469,9 @@ final class AccountManager: ObservableObject {
         _ quota: QuotaSnapshot?,
         provenance: TypelessQuotaReadProvenance
     ) -> String {
+        if provenance == .officialAPI, quota == nil || officialQuota?.failure != nil {
+            return officialQuotaMessage ?? "等待官方服务返回当前账号额度"
+        }
         if provenance == .requiresClientRestart {
             return "尚不能确认额度归属：首次读取、重新启动或同进程换号后，请停止录音并重启 Typeless，再核对账户"
         }
@@ -445,6 +491,7 @@ final class AccountManager: ObservableObject {
             "最近一次官方可见周额度（界面暂时被遮挡）"
         case .visibleWeeklyLimitReached:
             "Typeless 官方界面（每周限制已达）"
+        case .officialAPI: "Typeless 官方服务（当前账号已核对）"
         }
         if quota.isFresh() {
             return "来自 \(source)，快照新鲜"
