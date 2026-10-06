@@ -98,10 +98,15 @@ final class OfficialQuotaAPITests: XCTestCase {
     }
 
     func testHTTPFailuresUseFixedErrorsWithoutResponseBody() async {
-        for (status, code) in [(401, OfficialQuotaFailureCode.unauthorized), (429, .rateLimited),
+        for (status, code) in [(401, OfficialQuotaFailureCode.unauthorized), (403, .forbidden), (429, .rateLimited),
                                (500, .networkUnavailable), (302, .redirectBlocked)] {
             await assertFailure(code, bodies: TestQuotaHTTP(["private-response-secret"], status: status))
         }
+    }
+
+    func testUnsupportedClientResponseIsDistinctFromExpiredLogin() async {
+        let body = #"{"detail":"This client is not supported. Please use the official Typeless app.","data":"private-response-secret"}"#
+        await assertFailure(.clientUnsupported, bodies: TestQuotaHTTP([body], status: 403))
     }
 
     func testTransportRejectsOtherHostsAndAllRedirects() async throws {

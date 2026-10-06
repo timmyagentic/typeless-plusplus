@@ -33,7 +33,7 @@ struct CurrentAccountCard: View {
             Toggle("自动读取官方额度", isOn: Binding(
                 get: { manager.officialQuotaEnabled }, set: manager.setOfficialQuotaEnabled))
                 .toggleStyle(.switch)
-            Text("启用后无需打开 Typeless 页面。当前登录凭据仅在本机内存中用于官方查询，不保存或导出。")
+            Text("优先查询官方服务；接口不支持时，从已核对的官方界面读取。不保存或导出登录凭据。")
                 .font(.caption).foregroundStyle(.secondary)
 
             if let state = manager.currentState {
@@ -110,27 +110,30 @@ struct TypelessQuotaGuidance: View {
                 Label(message, systemImage: "arrow.triangle.2.circlepath")
                     .font(.caption).foregroundStyle(.secondary)
             }
-        } else if manager.currentReadResult?.quotaProvenance == .requiresClientRestart {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("需要刷新 Typeless 登录状态").font(.callout.weight(.semibold))
-                Text("尚不能确认主页额度属于当前账号。请结束录音，再重启 Typeless；随后打开设置 → 账户核对邮箱，回到主页即可自动同步。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button(manager.isRestartingTypeless ? "正在重启…" : "录音结束后重启 Typeless") {
-                    manager.restartTypeless()
+        }
+        if !manager.officialQuotaEnabled || manager.officialQuotaRequiresInterface {
+            if manager.currentReadResult?.quotaProvenance == .requiresClientRestart {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("需要刷新 Typeless 登录状态").font(.callout.weight(.semibold))
+                    Text("尚不能确认主页额度属于当前账号。请结束录音，再重启 Typeless；随后打开设置 → 账户核对邮箱，回到主页即可自动同步。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button(manager.isRestartingTypeless ? "正在重启…" : "录音结束后重启 Typeless") {
+                        manager.restartTypeless()
+                    }
+                    .disabled(manager.isRestartingTypeless)
+                    if let message = manager.clientControlMessage {
+                        Text(message).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-                .disabled(manager.isRestartingTypeless)
-                if let message = manager.clientControlMessage {
-                    Text(message).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if manager.currentReadResult?.quotaProvenance == .awaitingIdentityConfirmation {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("请打开 Typeless 设置 → 账户核对邮箱，再回主页。完成后额度会自动同步。")
+                        .font(.caption).foregroundStyle(.orange)
+                    Button("打开 Typeless 核对账户") { manager.openTypeless() }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if manager.currentReadResult?.quotaProvenance == .awaitingIdentityConfirmation {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("请打开 Typeless 设置 → 账户核对邮箱，再回主页。完成后额度会自动同步。")
-                    .font(.caption).foregroundStyle(.orange)
-                Button("打开 Typeless 核对账户") { manager.openTypeless() }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -388,12 +391,12 @@ struct SwitchStatusCard: View {
         case .verifying:
             let targetEmail = manager.accounts.first { $0.id == operation.targetAccountID }?.email ?? target
             if manager.currentState?.email == targetEmail {
-                if manager.officialQuotaEnabled {
+                if manager.officialQuotaEnabled && !manager.officialQuotaRequiresInterface {
                     return "已读取到目标邮箱 \(targetEmail)，正在向官方服务核对身份与额度，完成后自动确认成功。"
                 }
                 return "已读取到目标邮箱 \(targetEmail)。请按下方提示核对额度，完成后自动确认成功。"
             }
-            if manager.officialQuotaEnabled {
+            if manager.officialQuotaEnabled && !manager.officialQuotaRequiresInterface {
                 return "请在官方页面选择或登录 \(targetEmail)。完成桌面交接后会自动核对身份与额度。"
             }
             return "请在官方页面选择或登录 \(targetEmail)。完成桌面交接后会自动读取身份；每次换号需重启 Typeless 并在账户页核对邮箱，再回主页读取额度。"

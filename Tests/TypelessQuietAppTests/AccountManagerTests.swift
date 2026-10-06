@@ -94,6 +94,60 @@ private final class FakeTypelessClientController: TypelessClientControlling {
 
 @MainActor
 final class AccountManagerTests: XCTestCase {
+    func testUnsupportedAPIUsesOnlyFreshIdentityConfirmedInterfaceQuota() async throws {
+        let original = makeReadResult()
+        var state = original.state
+        state.quota = QuotaSnapshot(usedCharacters: 106, limitCharacters: 2_000,
+            observedAt: Date(), source: .typelessAccessibility)
+        let reader = MutableAccountStateReader(result: TypelessStateReadResult(
+            state: state, storageURL: original.storageURL, appVersion: "2.8.1", appRunning: true,
+            quotaProvenance: .visibleAccessibility))
+        let fetcher = ControlledQuotaFetcher()
+        let controller = OfficialQuotaController(fetcher: fetcher, isEnabled: true, schedulesDeferredEvents: false)
+        let manager = AccountManager(directoryStore: FakeDirectoryStore(), secretStore: FakeSecretStore(),
+            stateReader: reader, officialQuota: controller)
+        for _ in 0..<100 where fetcher.calls.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertNil(manager.currentState?.quota, "Wait for API classification before falling back")
+        fetcher.fail(0, .clientUnsupported)
+        for _ in 0..<100 where controller.isRefreshing { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(manager.currentState?.quota?.usedCharacters, 106)
+        XCTAssertEqual(manager.currentState?.quota?.source, .typelessAccessibility)
+        XCTAssertEqual(manager.currentReadResult?.quotaProvenance, .visibleAccessibility)
+        XCTAssertTrue(manager.officialQuotaMessage?.contains("第三方") == true)
+
+        for provenance in [TypelessQuotaReadProvenance.requiresClientRestart, .awaitingIdentityConfirmation, .localStorage] {
+            reader.result = TypelessStateReadResult(state: state, storageURL: original.storageURL,
+                appVersion: "2.8.1", appRunning: true, quotaProvenance: provenance)
+            manager.refresh()
+            XCTAssertNil(manager.currentState?.quota, "Unconfirmed or local quota must stay unavailable")
+        }
+        state.quota = QuotaSnapshot(usedCharacters: 106, limitCharacters: 2_000,
+            observedAt: Date().addingTimeInterval(-600), source: .typelessAccessibility)
+        reader.result = TypelessStateReadResult(state: state, storageURL: original.storageURL,
+            appVersion: "2.8.1", appRunning: true, quotaProvenance: .cachedAccessibility)
+        manager.refresh()
+        XCTAssertNil(manager.currentState?.quota, "Fallback cannot renew an expired timestamp")
+    }
+
+    func testUnauthorizedAPIDoesNotFallBackToVisibleQuota() async throws {
+        let original = makeReadResult()
+        var state = original.state
+        state.quota = QuotaSnapshot(usedCharacters: 106, limitCharacters: 2_000,
+            observedAt: Date(), source: .typelessAccessibility)
+        let reader = StubStateReader(result: TypelessStateReadResult(state: state,
+            storageURL: original.storageURL, appVersion: "2.8.1", appRunning: true,
+            quotaProvenance: .visibleAccessibility))
+        let fetcher = ControlledQuotaFetcher()
+        let controller = OfficialQuotaController(fetcher: fetcher, isEnabled: true, schedulesDeferredEvents: false)
+        let manager = AccountManager(directoryStore: FakeDirectoryStore(), secretStore: FakeSecretStore(),
+            stateReader: reader, officialQuota: controller)
+        for _ in 0..<100 where fetcher.calls.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        fetcher.fail(0, .unauthorized)
+        for _ in 0..<100 where controller.isRefreshing { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertNil(manager.currentState?.quota)
+        XCTAssertEqual(manager.currentReadResult?.quotaProvenance, .officialAPI)
+    }
+
     func testOfficialQuotaUpdatesWithoutPageNavigationAndDoesNotInventIdle() async throws {
         let reader = MutableAccountStateReader(result: makeReadResult())
         var state = reader.result.state
