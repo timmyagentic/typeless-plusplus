@@ -5,6 +5,28 @@ import XCTest
 @testable import TypelessQuietCore
 
 final class LiveTypelessStateSmokeTests: XCTestCase {
+    func testReadsOfficialQuotaWithoutOpeningAccountOrHomePages() async throws {
+        guard ProcessInfo.processInfo.environment["TYPELESS_PLUSPLUS_RUN_LIVE_OFFICIAL_QUOTA_QA"] == "true" else {
+            throw XCTSkip("Opt-in live current-session quota request")
+        }
+        let storage = try XCTUnwrap(TypelessCurrentStateReader.storageCandidates.first {
+            FileManager.default.fileExists(atPath: $0.path)
+        })
+        let sessions = OfficialQuotaSessionReader(directory: storage.deletingLastPathComponent())
+        let state = try TypelessCurrentStateReader(visibleQuotaCache: TypelessVisibleQuotaCache()).read()
+        let email = try XCTUnwrap(state.state.email)
+        let revision = try sessions.revision()
+        let client = OfficialQuotaAPIClient(sessions: sessions, transport: OfficialQuotaURLSessionTransport())
+        let observation = try await client.fetch(email: email, revision: revision)
+        XCTAssertTrue(observation.email == email)
+        XCTAssertTrue(observation.revision == revision)
+        XCTAssertTrue(try sessions.revision() == revision)
+        XCTAssertTrue(observation.quota.isFresh())
+        XCTAssertEqual(observation.quota.source, .typelessOfficialAPI)
+        XCTAssertGreaterThan(observation.quota.limitCharacters, 0)
+        print("Official API quota verified: used=\(observation.quota.usedCharacters), limit=\(observation.quota.limitCharacters), identityMatch=true, sessionUnchanged=true")
+    }
+
     func testReadsCurrentTypeless250IdentityWithoutPrintingValues() throws {
         try requireLiveQA()
         let result = try TypelessCurrentStateReader(visibleQuotaCache: TypelessVisibleQuotaCache()).read()

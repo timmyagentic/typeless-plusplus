@@ -27,6 +27,7 @@ struct TypelessStateReadResult: Sendable {
             self.quotaProvenance = switch state.quota?.source {
             case .typelessAccessibility: .visibleAccessibility
             case .typelessLocalStorage: .localStorage
+            case .typelessOfficialAPI: .officialAPI
             case nil: .unavailable
             }
         }
@@ -41,6 +42,7 @@ enum TypelessQuotaReadProvenance: String, Codable, Equatable, Sendable {
     case visibleAccessibility
     case cachedAccessibility
     case visibleWeeklyLimitReached
+    case officialAPI
 }
 
 struct TypelessVisibleQuotaResolution: Equatable, Sendable {

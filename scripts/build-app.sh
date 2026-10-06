@@ -32,6 +32,7 @@ cp "$binary_dir/TypelessPlusPlus" "$app_path/Contents/MacOS/TypelessPlusPlus"
 cp "$repo_root/Resources/Info.plist" "$app_path/Contents/Info.plist"
 cp "$repo_root/Resources/PkgInfo" "$app_path/Contents/PkgInfo"
 cp "$repo_root/Resources/AppIcon.icns" "$app_path/Contents/Resources/AppIcon.icns"
+cp "$repo_root/THIRD_PARTY_NOTICES.md" "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md"
 chmod 755 "$app_path/Contents/MacOS/TypelessPlusPlus"
 
 # SwiftPM links binary frameworks but does not embed their runtime helpers.

@@ -53,7 +53,7 @@ struct TypelessQuietApplication: App {
             Divider()
 
             Button("刷新账号与额度") {
-                model.accountManager.refresh()
+                model.accountManager.refresh(forceOfficialQuota: true)
             }
 
             let switchableAccounts = model.accountManager.accounts.filter {
