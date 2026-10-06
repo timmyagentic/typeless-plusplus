@@ -46,6 +46,40 @@ final class OfficialQuotaSessionTests: XCTestCase {
         }
     }
 
+    func testDiscoversStorageCreatedAfterReaderStarts() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let candidates = ["Typeless", "Typeless.exe"].map {
+            root.appendingPathComponent($0).appendingPathComponent("app-storage.json")
+        }
+        let reader = OfficialQuotaSessionReader(storageCandidates: candidates)
+        XCTAssertThrowsError(try reader.revision())
+        try writeSession(in: candidates[1].deletingLastPathComponent())
+        XCTAssertEqual(try reader.read().email, "current@example.com")
+    }
+
+    func testRebindsWhenTheSelectedStorageDirectoryChanges() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let candidates = ["Typeless", "Typeless.exe"].map {
+            root.appendingPathComponent($0).appendingPathComponent("app-storage.json")
+        }
+        try writeSession(in: candidates[0].deletingLastPathComponent())
+        let reader = OfficialQuotaSessionReader(storageCandidates: candidates)
+        let initialRevision = try reader.revision()
+        try writeSession(in: candidates[1].deletingLastPathComponent())
+        try FileManager.default.removeItem(at: candidates[0].deletingLastPathComponent())
+        XCTAssertEqual(try reader.read().email, "current@example.com")
+        XCTAssertNotEqual(try reader.revision(), initialRevision)
+    }
+
+    private func writeSession(in directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(base64Encoded: armFixture)!.write(to: directory.appendingPathComponent("user-data.json"))
+        try Data(#"{"userData":{"email":"current@example.com"}}"#.utf8)
+            .write(to: directory.appendingPathComponent("app-storage.json"))
+    }
+
     func testRejectsMalformedAndUnsupportedSessionFormats() throws {
         let fixture = try XCTUnwrap(Data(base64Encoded: armFixture))
         var wrongMarker = fixture

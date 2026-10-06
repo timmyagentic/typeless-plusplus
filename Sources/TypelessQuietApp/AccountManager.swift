@@ -70,12 +70,9 @@ final class AccountManager: ObservableObject {
     }
 
     convenience init() {
-        let storage = TypelessCurrentStateReader.storageCandidates.first {
-            FileManager.default.fileExists(atPath: $0.path)
-        } ?? TypelessCurrentStateReader.storageCandidates[0]
         let automaticQuota = OfficialQuotaController(
             fetcher: OfficialQuotaAPIClient(
-                sessions: OfficialQuotaSessionReader(directory: storage.deletingLastPathComponent()),
+                sessions: OfficialQuotaSessionReader(),
                 transport: OfficialQuotaURLSessionTransport()),
             isEnabled: UserDefaults.standard.bool(forKey: OfficialQuotaController.preferenceKey),
             persistEnabled: { UserDefaults.standard.set($0, forKey: OfficialQuotaController.preferenceKey) })

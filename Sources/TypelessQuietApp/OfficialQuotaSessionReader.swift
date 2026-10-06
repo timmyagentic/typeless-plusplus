@@ -6,8 +6,19 @@ import TypelessQuietCore
 /// Reads only the currently installed client's two session files. Nothing is written back.
 /// Format reference: fufu1209/Typeless, scripts/extract-active-session.js (MIT).
 struct OfficialQuotaSessionReader: OfficialQuotaSessionReading {
-    let directory: URL
+    private let storageCandidates: [URL]
     var platformSignature: String = Self.currentPlatformSignature
+
+    init(directory: URL, platformSignature: String = Self.currentPlatformSignature) {
+        self.init(storageCandidates: [directory.appendingPathComponent("app-storage.json")],
+                  platformSignature: platformSignature)
+    }
+
+    init(storageCandidates: [URL] = TypelessCurrentStateReader.storageCandidates,
+         platformSignature: String = Self.currentPlatformSignature) {
+        self.storageCandidates = storageCandidates
+        self.platformSignature = platformSignature
+    }
 
     private static var currentPlatformSignature: String {
         #if arch(arm64)
@@ -47,10 +58,13 @@ struct OfficialQuotaSessionReader: OfficialQuotaSessionReading {
     }
 
     private struct Input {
+        let storageURL: URL
         let encrypted: Data
         let email: String
         var revision: String {
-            var data = encrypted
+            var data = Data(storageURL.standardizedFileURL.path.utf8)
+            data.append(0)
+            data.append(encrypted)
             data.append(contentsOf: email.utf8)
             return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         }
@@ -58,12 +72,16 @@ struct OfficialQuotaSessionReader: OfficialQuotaSessionReading {
 
     private func input() throws -> Input {
         do {
+            guard let storageURL = storageCandidates.first(where: {
+                FileManager.default.fileExists(atPath: $0.path)
+            }) else { throw OfficialQuotaFailure(code: .sessionUnavailable) }
+            let directory = storageURL.deletingLastPathComponent()
             let encrypted = try boundedRead(directory.appendingPathComponent("user-data.json"))
             let state = try TypelessLocalStateParser.parse(
-                data: boundedRead(directory.appendingPathComponent("app-storage.json")),
+                data: boundedRead(storageURL),
                 observedAt: Date(), fileModifiedAt: nil)
             guard let email = state.email else { throw OfficialQuotaFailure(code: .sessionUnavailable) }
-            return Input(encrypted: encrypted, email: email)
+            return Input(storageURL: storageURL, encrypted: encrypted, email: email)
         } catch let error as OfficialQuotaFailure { throw error }
         catch { throw OfficialQuotaFailure(code: .sessionUnavailable) }
     }
