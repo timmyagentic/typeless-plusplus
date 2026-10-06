@@ -34,10 +34,20 @@ struct AccessibilityElementReader {
     private let maximumCardDepth = 12
 
     func windowElements(in application: AXUIElement) -> [AXUIElement] {
-        guard let rawValue = attribute("AXWindows", of: application) else {
-            return []
+        windowElements(readAttribute: { attribute($0, of: application) })
+    }
+
+    func windowElements(readAttribute: (String) -> CFTypeRef?) -> [AXUIElement] {
+        var windows = readAttribute("AXWindows").map(elementArray(from:)) ?? []
+        // Typeless 2.8.1 can omit its hub from AXWindows while exposing it as the
+        // main/focused window. Keep those roots available for quota and observers.
+        for name in ["AXMainWindow", "AXFocusedWindow"] {
+            if let value = readAttribute(name), CFGetTypeID(value) == AXUIElementGetTypeID() {
+                windows.append(unsafeBitCast(value, to: AXUIElement.self))
+            }
         }
-        return elementArray(from: rawValue)
+        var seen = AXElementIdentitySet()
+        return windows.filter { seen.insert($0) }
     }
 
     func targetCardElements(in application: AXUIElement) -> Result<[AXUIElement], AXScanFailure> {
