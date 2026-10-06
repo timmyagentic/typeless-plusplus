@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Foundation
 import XCTest
 @testable import TypelessQuietApp
@@ -16,7 +17,7 @@ final class LiveTypelessStateSmokeTests: XCTestCase {
         let state = try TypelessCurrentStateReader(visibleQuotaCache: TypelessVisibleQuotaCache()).read()
         let email = try XCTUnwrap(state.state.email)
         let revision = try sessions.revision()
-        let client = OfficialQuotaAPIClient(sessions: sessions, transport: OfficialQuotaURLSessionTransport())
+        let client = OfficialQuotaAPIClient(sessions: sessions, transport: LiveStatusReportingTransport())
         let observation = try await client.fetch(email: email, revision: revision)
         XCTAssertTrue(observation.email == email)
         XCTAssertTrue(observation.revision == revision)
@@ -27,11 +28,14 @@ final class LiveTypelessStateSmokeTests: XCTestCase {
         print("Official API quota verified: used=\(observation.quota.usedCharacters), limit=\(observation.quota.limitCharacters), identityMatch=true, sessionUnchanged=true")
     }
 
-    func testReadsCurrentTypeless250IdentityWithoutPrintingValues() throws {
+    func testReadsCurrentTypelessIdentityWithoutPrintingValues() throws {
         try requireLiveQA()
         let result = try TypelessCurrentStateReader(visibleQuotaCache: TypelessVisibleQuotaCache()).read()
 
-        XCTAssertEqual(result.appVersion, "2.5.0")
+        XCTAssertNotNil(result.appVersion)
+        if let expected = ProcessInfo.processInfo.environment["TYPELESS_PLUSPLUS_EXPECTED_TYPELESS_VERSION"] {
+            XCTAssertEqual(result.appVersion, expected)
+        }
         XCTAssertTrue(result.appRunning)
         XCTAssertNotNil(result.state.email)
     }
@@ -65,6 +69,8 @@ final class LiveTypelessStateSmokeTests: XCTestCase {
         try requireLiveQA()
         let app = try XCTUnwrap(NSRunningApplication.runningApplications(
             withBundleIdentifier: TargetPromptMatcher.targetBundleIdentifier).first)
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: TargetPromptMatcher.targetBundleIdentifier)
+        print("Official process count: \(apps.count), trusted=\(AXIsProcessTrusted())")
         let windows = TypelessCurrentStateReader(visibleQuotaCache: TypelessVisibleQuotaCache()).accessibilityWindows(processIdentifier: app.processIdentifier)
         for window in windows {
             let accountFields = window.texts.filter {
@@ -78,11 +84,44 @@ final class LiveTypelessStateSmokeTests: XCTestCase {
         print("Official identity confirmation available: \(evidence.confirmedEmail != nil)")
     }
 
+    func testScansCurrentTypelessPromptContainersWithoutPressingControls() throws {
+        try requireLiveQA()
+        let app = try XCTUnwrap(NSRunningApplication.runningApplications(
+            withBundleIdentifier: TargetPromptMatcher.targetBundleIdentifier).first)
+        let reader = AccessibilityElementReader()
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.25)
+        let cards = try reader.targetCardElements(in: application).get()
+        print("Official prompt containers: \(cards.count)")
+        var snapshots: [AXNodeSnapshot] = []
+        for (index, card) in cards.enumerated() {
+            let captured = reader.capture(card)
+            switch captured {
+            case let .success(value):
+                print("Prompt container \(index): role=\(value.snapshot.role ?? "nil"), subrole=\(value.snapshot.subrole ?? "nil"), nodes=\(value.elementsByPath.count)")
+                snapshots.append(value.snapshot)
+            case let .failure(failure):
+                print("Prompt container \(index): \(failure)")
+                XCTFail("Current official container could not be safely scanned")
+            }
+        }
+        XCTAssertEqual(TargetPromptMatcher().decision(for: snapshots), .noTarget)
+    }
+
     private func requireLiveQA() throws {
         guard ProcessInfo.processInfo.environment[
             "TYPELESS_PLUSPLUS_RUN_LIVE_READ_QA"
         ] == "true" else {
             throw XCTSkip("Set TYPELESS_PLUSPLUS_RUN_LIVE_READ_QA=true for local live QA")
         }
+    }
+}
+
+private struct LiveStatusReportingTransport: OfficialQuotaHTTPTransport {
+    func send(_ request: URLRequest) async throws -> OfficialQuotaHTTPResponse {
+        let response = try await OfficialQuotaURLSessionTransport().send(request)
+        print("Official quota endpoint: \(request.url?.path ?? "unknown"), status=\(response.statusCode)")
+
+        return response
     }
 }

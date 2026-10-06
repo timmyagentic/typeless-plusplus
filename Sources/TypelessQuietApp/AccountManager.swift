@@ -115,6 +115,10 @@ final class AccountManager: ObservableObject {
 
     var accounts: [AccountProfile] { directory.accounts }
 
+    var officialQuotaRequiresInterface: Bool {
+        officialQuotaEnabled && officialQuota?.failure?.code == .clientUnsupported
+    }
+
     deinit { quotaExpiryTimer?.invalidate() }
 
     var currentAccountIsManaged: Bool {
@@ -303,9 +307,20 @@ final class AccountManager: ObservableObject {
                 let changed = officialQuota.observe(email: result.state.email)
                 if requestOfficialQuota || changed { officialQuota.requestRefresh(force: forceOfficialQuota) }
                 var state = result.state
-                state.quota = officialQuota.cachedQuota(for: state.email)
+                var provenance: TypelessQuotaReadProvenance = .officialAPI
+                if officialQuotaRequiresInterface {
+                    let confirmedSources: Set<TypelessQuotaReadProvenance> = [
+                        .visibleAccessibility, .cachedAccessibility, .visibleWeeklyLimitReached,
+                    ]
+                    let canUseInterface = result.appRunning && confirmedSources.contains(result.quotaProvenance)
+                        && state.quota?.source == .typelessAccessibility && state.quota?.isFresh() == true
+                    if !canUseInterface { state.quota = nil }
+                    provenance = result.quotaProvenance == .localStorage ? .unavailable : result.quotaProvenance
+                } else {
+                    state.quota = officialQuota.cachedQuota(for: state.email)
+                }
                 result = TypelessStateReadResult(state: state, storageURL: result.storageURL,
-                    appVersion: result.appVersion, appRunning: result.appRunning, quotaProvenance: .officialAPI)
+                    appVersion: result.appVersion, appRunning: result.appRunning, quotaProvenance: provenance)
                 officialQuotaMessage = officialQuota.failure?.localizedDescription
                     ?? (officialQuota.isRefreshing ? "正在向官方服务核对账号与额度…"
                         : state.quota == nil ? "等待当前登录会话可用后自动同步。"

@@ -43,6 +43,27 @@ final class OfficialQuotaControllerTests: XCTestCase {
     private let email = "current@example.com"
     private var date = Date(timeIntervalSince1970: 2_000)
 
+    func testUnsupportedClientStopsBackgroundRetriesUntilSessionChanges() async throws {
+        let fetcher = ControlledQuotaFetcher()
+        let controller = makeController(fetcher)
+        controller.observe(email: email)
+        controller.requestRefresh()
+        try await eventually { fetcher.calls.count == 1 }
+        fetcher.fail(0, .clientUnsupported)
+        try await eventually { !controller.isRefreshing }
+        date.addTimeInterval(1_000)
+        controller.requestRefresh()
+        XCTAssertEqual(fetcher.calls.count, 1)
+        XCTAssertNil(controller.cachedQuota(for: email))
+        fetcher.revision = "new-session"
+        XCTAssertTrue(controller.observe(email: email))
+        controller.requestRefresh()
+        try await eventually { fetcher.calls.count == 2 }
+        fetcher.succeed(1, at: date)
+        try await eventually { !controller.isRefreshing }
+        XCTAssertNotNil(controller.cachedQuota(for: email))
+    }
+
     func testDisabledModeDoesNotReadSessionOrRequestUntilExplicitlyEnabled() async throws {
         let fetcher = ControlledQuotaFetcher()
         var saved: [Bool] = []

@@ -3,7 +3,7 @@ import TypelessQuietCore
 
 enum OfficialQuotaFailureCode: String, Codable, Sendable {
     case sessionUnavailable, invalidSession, identityMismatch, sessionChanged
-    case unauthorized, rateLimited, networkUnavailable, invalidResponse, redirectBlocked
+    case unauthorized, forbidden, clientUnsupported, rateLimited, networkUnavailable, invalidResponse, redirectBlocked
 }
 
 struct OfficialQuotaFailure: Error, Equatable, Sendable, LocalizedError {
@@ -16,6 +16,8 @@ struct OfficialQuotaFailure: Error, Equatable, Sendable, LocalizedError {
         case .invalidSession: "当前登录会话暂不可读，等待 Typeless 更新登录状态。"
         case .identityMismatch, .sessionChanged: "登录状态正在变化，尚未采用本次额度。"
         case .unauthorized: "官方登录会话已失效，请在 Typeless 完成登录后重试。"
+        case .forbidden: "官方拒绝了本次额度查询，尚未采用本次结果。"
+        case .clientUnsupported: "官方服务已限制第三方额度查询，改为读取已核对的官方界面。"
         case .rateLimited: "官方服务请求较多，稍后自动同步时再试。"
         case .networkUnavailable: "暂时无法连接官方服务，保留原同步时间。"
         case .invalidResponse: "官方服务暂未提供可识别的周额度。"
@@ -126,6 +128,11 @@ struct OfficialQuotaAPIClient: OfficialQuotaFetching {
         let voice_transcription: Voice?
     }
 
+    private struct Rejection: Decodable {
+        let detail: String?
+        let message: String?
+    }
+
     private func request<Value: Decodable>(_ path: String, method: String,
                                            session: OfficialQuotaSession) async throws -> Value {
         var request = URLRequest(url: URL(string: "https://api.typeless.com" + path)!)
@@ -144,7 +151,16 @@ struct OfficialQuotaAPIClient: OfficialQuotaFetching {
         switch response.statusCode {
         case 200: break
         case 300..<400: throw OfficialQuotaFailure(code: .redirectBlocked)
-        case 401, 403: throw OfficialQuotaFailure(code: .unauthorized)
+        case 401: throw OfficialQuotaFailure(code: .unauthorized)
+        case 403:
+            // A 403 is not proof that the current login expired. Only the official
+            // service's explicit unsupported-client response permits AX fallback.
+            let unsupported = "This client is not supported. Please use the official Typeless app."
+            let rejection = response.data.count <= 1_048_576
+                ? try? JSONDecoder().decode(Rejection.self, from: response.data) : nil
+            let code: OfficialQuotaFailureCode = rejection?.detail == unsupported || rejection?.message == unsupported
+                ? .clientUnsupported : .forbidden
+            throw OfficialQuotaFailure(code: code)
         case 429: throw OfficialQuotaFailure(code: .rateLimited, retryAfter: response.retryAfter)
         default: throw OfficialQuotaFailure(code: .networkUnavailable)
         }

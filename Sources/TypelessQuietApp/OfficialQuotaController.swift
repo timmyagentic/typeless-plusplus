@@ -80,6 +80,9 @@ final class OfficialQuotaController {
 
     func requestRefresh(force: Bool = false) {
         guard isEnabled, let context else { return }
+        // Repeated file/AX events cannot repair an unsupported client. A manual
+        // refresh or a changed session can probe again, with the existing backoff.
+        guard failure?.code != .clientUnsupported || force else { return }
         guard task == nil else {
             eventDuringRequest = true
             return
@@ -134,14 +137,15 @@ final class OfficialQuotaController {
                             min(86_400, max(0, issue.retryAfter ?? 0)))
             failureRetryAt = date.addingTimeInterval(delay)
             nextAttemptAt = failureRetryAt
-            if [.sessionChanged, .identityMismatch, .unauthorized, .invalidSession].contains(issue.code) {
+            if [.sessionChanged, .identityMismatch, .unauthorized, .forbidden, .clientUnsupported, .invalidSession].contains(issue.code) {
                 observation = nil
             }
         }
         let pending = eventDuringRequest
         eventDuringRequest = false
         onUpdate?()
-        if pending, self.generation == generation, let nextAttemptAt { scheduleEvent(at: nextAttemptAt) }
+        if pending, failure?.code != .clientUnsupported, self.generation == generation,
+           let nextAttemptAt { scheduleEvent(at: nextAttemptAt) }
     }
 
     private func scheduleEvent(at date: Date) {

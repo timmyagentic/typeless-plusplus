@@ -337,9 +337,18 @@ struct TypelessCurrentStateReader: TypelessCurrentStateReading {
             fileManager.homeDirectoryForCurrentUser
                 .appendingPathComponent("Applications/Typeless.app"),
         ]
-        for appURL in candidates where fileManager.fileExists(atPath: appURL.path) {
-            if let bundle = Bundle(url: appURL),
-               let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+        return Self.installedVersion(in: candidates)
+    }
+
+    static func installedVersion(in candidates: [URL]) -> String? {
+        for appURL in candidates where FileManager.default.fileExists(atPath: appURL.path) {
+            // Bundle caches Info.plist for the lifetime of this process. The official
+            // client can update in place while this menu-bar app remains running.
+            let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+            if let data = try? Data(contentsOf: infoURL),
+               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+               let version = info["CFBundleShortVersionString"] as? String,
+               !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return version
             }
         }
@@ -356,13 +365,18 @@ struct TypelessCurrentStateReader: TypelessCurrentStateReading {
             var seen = TypelessAXIdentitySet()
             var texts: [String] = []
             var documents: [String] = []
+            var buttonNames = Set<String>()
             _ = seen.insert(window)
             while index < queue.count && index < 2_500 {
                 let item = queue[index]
                 index += 1
+                let isButton = stringAttribute("AXRole", of: item.element) == "AXButton"
                 for attribute in ["AXTitle", "AXValue", "AXDescription", "AXHelp"] {
                     if let text = stringAttribute(attribute, of: item.element), !text.isEmpty {
                         texts.append(text)
+                        if isButton {
+                            buttonNames.insert(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                        }
                     }
                 }
                 for attribute in ["AXDocument", "AXURL"] {
@@ -375,7 +389,7 @@ struct TypelessCurrentStateReader: TypelessCurrentStateReading {
                     queue.append((child, item.depth + 1))
                 }
             }
-            return TypelessWindowSnapshot(documents: documents, texts: texts)
+            return TypelessWindowSnapshot(documents: documents, texts: texts, buttonNames: buttonNames)
         }
     }
 
@@ -419,6 +433,7 @@ private extension CurrentTypelessState {
 struct TypelessWindowSnapshot {
     let documents: [String]
     let texts: [String]
+    var buttonNames: Set<String> = []
 
     func containsDocument(_ name: String) -> Bool {
         documents.contains { value in
@@ -441,6 +456,8 @@ struct TypelessWindowEvidence {
         let accountLabels: Set<String> = ["账户", "帳戶", "Account"]
         let emailLabels: Set<String> = ["电子邮件", "電子郵件", "Email"]
         let subscriptionLabels: Set<String> = ["订阅", "訂閱", "Subscription"]
+        let settingsLabels: Set<String> = ["设置", "設定", "Settings"]
+        let logoutLabels: Set<String> = ["退出", "登出", "Log out", "Logout", "Sign out"]
         var identities = Set<String>()
         for hub in hubs {
             var labels: [String] = []
@@ -448,13 +465,27 @@ struct TypelessWindowEvidence {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if labels.last != trimmed { labels.append(trimmed) }
             }
-            guard labels.count >= 4 else { continue }
-            for index in 0 ... labels.count - 4 {
-                if accountLabels.contains(labels[index]), emailLabels.contains(labels[index + 1]),
-                   let email = AccountProfile.normalizedEmail(labels[index + 2]),
-                   subscriptionLabels.contains(labels[index + 3]) {
-                    identities.insert(email)
+            if labels.count >= 4 {
+                for index in 0 ... labels.count - 4 {
+                    if accountLabels.contains(labels[index]), emailLabels.contains(labels[index + 1]),
+                       let email = AccountProfile.normalizedEmail(labels[index + 2]),
+                       subscriptionLabels.contains(labels[index + 3]) {
+                        identities.insert(email)
+                    }
                 }
+            }
+            // 2.8.1 coalesces these labels into one static text element. Require the
+            // real Account/Settings/logout buttons before accepting that form; a
+            // dictation-history string alone must never validate an identity.
+            guard !hub.buttonNames.isDisjoint(with: accountLabels),
+                  !hub.buttonNames.isDisjoint(with: settingsLabels),
+                  !hub.buttonNames.isDisjoint(with: logoutLabels) else { continue }
+            for text in labels {
+                let fields = text.split(whereSeparator: \.isWhitespace).map(String.init)
+                guard fields.count == 5, accountLabels.contains(fields[0]),
+                      emailLabels.contains(fields[1]), subscriptionLabels.contains(fields[3]),
+                      let email = AccountProfile.normalizedEmail(fields[2]) else { continue }
+                identities.insert(email)
             }
         }
         confirmedEmail = identities.count == 1 ? identities.first : nil
