@@ -358,7 +358,7 @@ struct TypelessCurrentStateReader: TypelessCurrentStateReading {
     func accessibilityWindows(processIdentifier: pid_t) -> [TypelessWindowSnapshot] {
         let application = AXUIElementCreateApplication(processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.25)
-        let windows = elements("AXWindows", of: application)
+        let windows = AccessibilityElementReader().windowElements(in: application)
         return windows.prefix(16).map { window in
             var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
             var index = 0

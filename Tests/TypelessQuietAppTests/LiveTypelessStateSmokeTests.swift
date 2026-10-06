@@ -82,6 +82,10 @@ final class LiveTypelessStateSmokeTests: XCTestCase {
         XCTAssertFalse(windows.isEmpty)
         let evidence = TypelessWindowEvidence(windows: windows)
         print("Official identity confirmation available: \(evidence.confirmedEmail != nil)")
+        if ProcessInfo.processInfo.environment["TYPELESS_PLUSPLUS_EXPECT_ACCOUNT_PANE"] == "true" {
+            XCTAssertTrue(windows.contains { $0.containsDocument("hub.html") })
+            XCTAssertNotNil(evidence.confirmedEmail)
+        }
     }
 
     func testScansCurrentTypelessPromptContainersWithoutPressingControls() throws {
