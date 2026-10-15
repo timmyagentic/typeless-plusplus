@@ -1,5 +1,11 @@
 # Typeless++
 
+> [!IMPORTANT]
+> **本项目已停止维护（2026-10-15）。** 作者已不再使用 Typeless，因此不再继续维护 Typeless++。
+> 后续不再计划提供功能更新、问题修复或新版 Typeless / macOS 的兼容适配。
+> 源码与历史发布版本保留供参考，但不保证它们继续兼容新版本。欢迎遵循 [MIT 许可证](LICENSE)自行 Fork 和维护。
+> 下文的功能、路线图与验证记录均为停更前的历史状态，不代表后续开发或发布承诺。
+
 [![CI](https://github.com/timmyagentic/typeless-plusplus/actions/workflows/ci.yml/badge.svg)](https://github.com/timmyagentic/typeless-plusplus/actions/workflows/ci.yml)
 
 一个轻量、原生的 macOS 菜单栏工具：自动关闭 Typeless 的瞬时付费升级提示，并在本机
@@ -38,7 +44,7 @@ Typeless++ 是非官方项目，与 Typeless 或 Simply LLC 没有隶属、授�
 
 默认自动检查，可选择「仅正式版」或「Beta 与正式版」。Beta 可以升级至更高构建号的正式版，旧 Quiet 版本不会因版本号较大而被误判为更新。
 
-这项能力尚待随新版本发布；现有 Beta 1 / Beta 2 没有更新器，第一次仍需手动安装新版本。发布步骤与隔离 QA 见 [自动更新说明](docs/UPDATES.md)。
+这项能力在停更前未随新版本发布；现有 Beta 1 / Beta 2 没有更新器，项目不再计划发布包含更新器的新版本。历史发布步骤与隔离 QA 见 [自动更新说明](docs/UPDATES.md)。
 
 ## 为什么不是 Hammerspoon
 
@@ -304,7 +310,9 @@ Intel 会话格式有离线测试、真实 Intel 客户端为 `UNVERIFIED`。关
 
 ## 参与贡献
 
-欢迎提交 Issue 或 Pull Request。涉及匹配范围的修改必须附带负例测试；规则应继续保持
+项目已停止维护，作者不再承诺处理 Issue 或审核、合并 Pull Request。欢迎遵循 MIT 许可证自行 Fork 和维护。
+
+供后续维护者参考：涉及匹配范围的修改应附带负例测试；规则应继续保持
 fail closed，不能改成全局 Close 按钮搜索、模糊标题或屏幕坐标点击。
 
 ## License
